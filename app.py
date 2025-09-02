@@ -108,7 +108,7 @@ def load_student_risk_data():
             failing_grades,
             risk_category,
             activity_status
-        FROM public.student_risk_analysis_gold
+        FROM akshay_university_sample.public.student_risk_analysis_gold
         ORDER BY 
             CASE 
                 WHEN risk_category = 'High Risk' THEN 1
@@ -126,7 +126,7 @@ def load_student_risk_data():
             return df
         except Exception as e:
             st.error(f"Error loading student data: {str(e)}")
-            st.info("Please check that the 'public.student_risk_analysis_gold' table exists and you have proper permissions.")
+            st.info("Please check that the 'akshay_university_sample.public.student_risk_analysis_gold' table exists and you have proper permissions.")
             return pd.DataFrame()
 
 def list_available_tables():
