@@ -91,116 +91,55 @@ def get_connection(dbname=None):
 
 
 # Student Risk Management Functions
-def get_user_schema():
-    """Get the user-specific schema name."""
-    pguser = os.getenv("PGUSER", "").replace('-', '').replace('.', '_')
-    pgappname = os.getenv("PGAPPNAME", "student_app")
-    return f"{pgappname}_schema_{pguser}"
+
 
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def load_student_risk_data():
     """Load student risk data from database"""
     with get_connection(DATABASE_SYNCED_DATA) as conn:
-        # Try different possible table locations
-        possible_queries = [
-            # Try with user schema
-            f"""
-            SELECT 
-                student_id,
-                full_name,
-                major,
-                year_level,
-                gpa,
-                courses_enrolled,
-                failing_grades,
-                risk_category,
-                activity_status
-            FROM {get_user_schema()}.student_risk_analysis_gold
-            ORDER BY 
-                CASE 
-                    WHEN risk_category = 'High Risk' THEN 1
-                    WHEN risk_category = 'Medium Risk' THEN 2
-                    WHEN risk_category = 'Low Risk' THEN 3
-                    WHEN risk_category = 'Excellent' THEN 4
-                    ELSE 5
-                END,
-                failing_grades DESC,
-                gpa ASC
-            """,
-            # Try with public schema
-            """
-            SELECT 
-                student_id,
-                full_name,
-                major,
-                year_level,
-                gpa,
-                courses_enrolled,
-                failing_grades,
-                risk_category,
-                activity_status
-            FROM public.student_risk_analysis_gold
-            ORDER BY 
-                CASE 
-                    WHEN risk_category = 'High Risk' THEN 1
-                    WHEN risk_category = 'Medium Risk' THEN 2
-                    WHEN risk_category = 'Low Risk' THEN 3
-                    WHEN risk_category = 'Excellent' THEN 4
-                    ELSE 5
-                END,
-                failing_grades DESC,
-                gpa ASC
-            """,
-            # Try without schema (original)
-            """
-            SELECT 
-                student_id,
-                full_name,
-                major,
-                year_level,
-                gpa,
-                courses_enrolled,
-                failing_grades,
-                risk_category,
-                activity_status
-            FROM student_risk_analysis_gold
-            ORDER BY 
-                CASE 
-                    WHEN risk_category = 'High Risk' THEN 1
-                    WHEN risk_category = 'Medium Risk' THEN 2
-                    WHEN risk_category = 'Low Risk' THEN 3
-                    WHEN risk_category = 'Excellent' THEN 4
-                    ELSE 5
-                END,
-                failing_grades DESC,
-                gpa ASC
-            """
-        ]
+        query = """
+        SELECT 
+            student_id,
+            full_name,
+            major,
+            year_level,
+            gpa,
+            courses_enrolled,
+            failing_grades,
+            risk_category,
+            activity_status
+        FROM public.student_risk_analysis_gold
+        ORDER BY 
+            CASE 
+                WHEN risk_category = 'High Risk' THEN 1
+                WHEN risk_category = 'Medium Risk' THEN 2
+                WHEN risk_category = 'Low Risk' THEN 3
+                WHEN risk_category = 'Excellent' THEN 4
+                ELSE 5
+            END,
+            failing_grades DESC,
+            gpa ASC
+        """
         
-        for i, query in enumerate(possible_queries):
-            try:
-                df = pd.read_sql_query(query, conn)
-                if not df.empty:
-                    return df
-            except Exception as e:
-                if i == len(possible_queries) - 1:  # Last attempt
-                    st.error(f"Error loading student data: {str(e)}")
-                    st.info("Please check that the 'student_risk_analysis_gold' table exists and you have proper permissions.")
-                    st.info(f"Attempted schemas: {get_user_schema()}, public, and default")
-                continue
-        
-        return pd.DataFrame()
+        try:
+            df = pd.read_sql_query(query, conn)
+            return df
+        except Exception as e:
+            st.error(f"Error loading student data: {str(e)}")
+            st.info("Please check that the 'public.student_risk_analysis_gold' table exists and you have proper permissions.")
+            return pd.DataFrame()
 
 def list_available_tables():
-    """List available tables for debugging purposes"""
+    """List available tables in public schema for debugging purposes"""
     with get_connection(DATABASE_SYNCED_DATA) as conn:
         try:
-            # Query to list all tables the user has access to
+            # Query to list tables in public schema
             query = """
             SELECT schemaname, tablename 
             FROM pg_tables 
-            WHERE tablename LIKE '%student%' OR tablename LIKE '%risk%'
-            ORDER BY schemaname, tablename
+            WHERE schemaname = 'public' 
+            AND (tablename LIKE '%student%' OR tablename LIKE '%risk%')
+            ORDER BY tablename
             """
             df = pd.read_sql_query(query, conn)
             return df
@@ -209,11 +148,11 @@ def list_available_tables():
             return pd.DataFrame()
 
 def create_intervention_table():
-    """Create interventions table if it doesn't exist"""
+    """Create interventions table in public schema if it doesn't exist"""
     with get_connection(DATABASE_REMEDIATION_DATA) as conn:
         with conn.cursor() as cur:
             create_table_query = """
-            CREATE TABLE IF NOT EXISTS student_interventions (
+            CREATE TABLE IF NOT EXISTS public.student_interventions (
                 student_id VARCHAR(255),
                 intervention_type VARCHAR(255),
                 intervention_details TEXT,
@@ -235,7 +174,7 @@ def submit_intervention(student_id, intervention_type, details, created_by):
     with get_connection(DATABASE_REMEDIATION_DATA) as conn:
         with conn.cursor() as cur:
             insert_query = """
-            INSERT INTO student_interventions
+            INSERT INTO public.student_interventions
             (student_id, intervention_type, intervention_details, created_by)
             VALUES (%s, %s, %s, %s)
             """
@@ -256,8 +195,6 @@ def get_risk_color(risk_category):
         'Excellent': '#28A745'
     }
     return colors.get(risk_category, '#808080')
-
-
 
 
 # Streamlit UI
@@ -309,16 +246,16 @@ def show_student_dashboard():
         if st.checkbox("🔧 Debug Mode"):
             st.subheader("Debug Information")
             st.write(f"**Database:** {DATABASE_SYNCED_DATA}")
-            st.write(f"**User Schema:** {get_user_schema()}")
+            st.write(f"**Schema:** public")
             
             if st.button("List Available Tables"):
                 with st.spinner("Listing tables..."):
                     tables_df = list_available_tables()
                     if not tables_df.empty:
-                        st.write("**Available Tables:**")
+                        st.write("**Available Tables in Public Schema:**")
                         st.dataframe(tables_df)
                     else:
-                        st.write("No tables found or access denied")
+                        st.write("No student/risk tables found in public schema")
     
     try:
         # Load data
