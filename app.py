@@ -23,6 +23,7 @@ DATABRICKS_CLIENT_ID = os.getenv("DATABRICKS_CLIENT_ID")
 DATABRICKS_CLIENT_SECRET = os.getenv("DATABRICKS_CLIENT_SECRET")
 USER_EMAIL = st.context.headers.get('X-Forwarded-Email')
 USER_TOKEN = st.context.headers.get('X-Forwarded-Access-Token')
+PAT_TOKEN = os.getenv('secret')
 
 logger.debug(f"DATABASE_SYNCED_DATA: {DATABASE_SYNCED_DATA}")
 logger.debug(f"DATABASE_REMEDIATION_DATA: {DATABASE_REMEDIATION_DATA}")
@@ -35,7 +36,7 @@ logger.debug(f"USER_TOKEN: {USER_TOKEN}")
 # Database connection setup
 workspace_client = sdk.WorkspaceClient(
     host="https://e2-demo-field-eng.cloud.databricks.com",
-    token=USER_TOKEN
+    token=PAT_TOKEN
 )
 postgres_password = None
 last_password_refresh = 0
