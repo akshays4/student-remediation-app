@@ -91,39 +91,121 @@ def get_connection(dbname=None):
 
 
 # Student Risk Management Functions
+def get_user_schema():
+    """Get the user-specific schema name."""
+    pguser = os.getenv("PGUSER", "").replace('-', '').replace('.', '_')
+    pgappname = os.getenv("PGAPPNAME", "student_app")
+    return f"{pgappname}_schema_{pguser}"
+
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def load_student_risk_data():
     """Load student risk data from database"""
     with get_connection(DATABASE_SYNCED_DATA) as conn:
-        query = """
-        SELECT 
-            student_id,
-            full_name,
-            major,
-            year_level,
-            gpa,
-            courses_enrolled,
-            failing_grades,
-            risk_category,
-            activity_status
-        FROM student_risk_analysis_gold
-        ORDER BY 
-            CASE 
-                WHEN risk_category = 'High Risk' THEN 1
-                WHEN risk_category = 'Medium Risk' THEN 2
-                WHEN risk_category = 'Low Risk' THEN 3
-                WHEN risk_category = 'Excellent' THEN 4
-                ELSE 5
-            END,
-            failing_grades DESC,
-            gpa ASC
-        """
+        # Try different possible table locations
+        possible_queries = [
+            # Try with user schema
+            f"""
+            SELECT 
+                student_id,
+                full_name,
+                major,
+                year_level,
+                gpa,
+                courses_enrolled,
+                failing_grades,
+                risk_category,
+                activity_status
+            FROM {get_user_schema()}.student_risk_analysis_gold
+            ORDER BY 
+                CASE 
+                    WHEN risk_category = 'High Risk' THEN 1
+                    WHEN risk_category = 'Medium Risk' THEN 2
+                    WHEN risk_category = 'Low Risk' THEN 3
+                    WHEN risk_category = 'Excellent' THEN 4
+                    ELSE 5
+                END,
+                failing_grades DESC,
+                gpa ASC
+            """,
+            # Try with public schema
+            """
+            SELECT 
+                student_id,
+                full_name,
+                major,
+                year_level,
+                gpa,
+                courses_enrolled,
+                failing_grades,
+                risk_category,
+                activity_status
+            FROM public.student_risk_analysis_gold
+            ORDER BY 
+                CASE 
+                    WHEN risk_category = 'High Risk' THEN 1
+                    WHEN risk_category = 'Medium Risk' THEN 2
+                    WHEN risk_category = 'Low Risk' THEN 3
+                    WHEN risk_category = 'Excellent' THEN 4
+                    ELSE 5
+                END,
+                failing_grades DESC,
+                gpa ASC
+            """,
+            # Try without schema (original)
+            """
+            SELECT 
+                student_id,
+                full_name,
+                major,
+                year_level,
+                gpa,
+                courses_enrolled,
+                failing_grades,
+                risk_category,
+                activity_status
+            FROM student_risk_analysis_gold
+            ORDER BY 
+                CASE 
+                    WHEN risk_category = 'High Risk' THEN 1
+                    WHEN risk_category = 'Medium Risk' THEN 2
+                    WHEN risk_category = 'Low Risk' THEN 3
+                    WHEN risk_category = 'Excellent' THEN 4
+                    ELSE 5
+                END,
+                failing_grades DESC,
+                gpa ASC
+            """
+        ]
         
+        for i, query in enumerate(possible_queries):
+            try:
+                df = pd.read_sql_query(query, conn)
+                if not df.empty:
+                    return df
+            except Exception as e:
+                if i == len(possible_queries) - 1:  # Last attempt
+                    st.error(f"Error loading student data: {str(e)}")
+                    st.info("Please check that the 'student_risk_analysis_gold' table exists and you have proper permissions.")
+                    st.info(f"Attempted schemas: {get_user_schema()}, public, and default")
+                continue
+        
+        return pd.DataFrame()
+
+def list_available_tables():
+    """List available tables for debugging purposes"""
+    with get_connection(DATABASE_SYNCED_DATA) as conn:
         try:
+            # Query to list all tables the user has access to
+            query = """
+            SELECT schemaname, tablename 
+            FROM pg_tables 
+            WHERE tablename LIKE '%student%' OR tablename LIKE '%risk%'
+            ORDER BY schemaname, tablename
+            """
             df = pd.read_sql_query(query, conn)
             return df
         except Exception as e:
-            st.error(f"Error loading student data: {str(e)}")
+            st.error(f"Error listing tables: {str(e)}")
             return pd.DataFrame()
 
 def create_intervention_table():
@@ -222,6 +304,22 @@ def main():
 def show_student_dashboard():
     st.header("📊 Students at Risk Overview")
     
+    # Add debug section in sidebar
+    with st.sidebar:
+        if st.checkbox("🔧 Debug Mode"):
+            st.subheader("Debug Information")
+            st.write(f"**Database:** {DATABASE_SYNCED_DATA}")
+            st.write(f"**User Schema:** {get_user_schema()}")
+            
+            if st.button("List Available Tables"):
+                with st.spinner("Listing tables..."):
+                    tables_df = list_available_tables()
+                    if not tables_df.empty:
+                        st.write("**Available Tables:**")
+                        st.dataframe(tables_df)
+                    else:
+                        st.write("No tables found or access denied")
+    
     try:
         # Load data
         with st.spinner("Loading student data..."):
@@ -229,6 +327,7 @@ def show_student_dashboard():
         
         if df.empty:
             st.warning("No student data found.")
+            st.info("💡 Try enabling Debug Mode in the sidebar to see available tables.")
             return
         
         # Summary metrics
