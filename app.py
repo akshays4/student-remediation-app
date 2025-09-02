@@ -7,6 +7,11 @@ from databricks import sdk
 from psycopg_pool import ConnectionPool
 import plotly.express as px
 from dotenv import load_dotenv
+import logging
+
+
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -14,6 +19,13 @@ load_dotenv()
 # Database configuration variables
 DATABASE_SYNCED_DATA = os.getenv("DATABASE_SYNCED_DATA", "akshay_university_sample")
 DATABASE_REMEDIATION_DATA = os.getenv("DATABASE_REMEDIATION_DATA", "akshay_student_remediation")
+DATABRICKS_CLIENT_ID = os.getenv("DATABRICKS_CLIENT_ID")
+DATABRICKS_CLIENT_SECRET = os.getenv("DATABRICKS_CLIENT_SECRET")
+
+logger.debug(f"DATABASE_SYNCED_DATA: {DATABASE_SYNCED_DATA}")
+logger.debug(f"DATABASE_REMEDIATION_DATA: {DATABASE_REMEDIATION_DATA}")
+logger.debug(f"DATABRICKS_CLIENT_ID: {DATABRICKS_CLIENT_ID}")
+logger.debug(f"DATABRICKS_CLIENT_SECRET: {DATABRICKS_CLIENT_SECRET}")
 
 # Database connection setup
 workspace_client = sdk.WorkspaceClient()
@@ -29,6 +41,7 @@ def refresh_oauth_token():
         print("Refreshing PostgreSQL OAuth token")
         try:
             postgres_password = workspace_client.config.oauth_token().access_token
+            logger.debug(f"PostgreSQL OAuth token refreshed: {postgres_password}")
             last_password_refresh = time.time()
         except Exception as e:
             st.error(f"❌ Failed to refresh OAuth token: {str(e)}")
