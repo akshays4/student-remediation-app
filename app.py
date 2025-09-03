@@ -4,7 +4,6 @@ import pandas as pd
 import os
 import time
 from databricks import sdk
-from psycopg_pool import ConnectionPool
 import plotly.express as px
 from dotenv import load_dotenv
 import logging
@@ -37,8 +36,7 @@ def get_user_credentials():
 logger.debug(f"DATABASE_SYNCED_DATA: {DATABASE_SYNCED_DATA}")
 logger.debug(f"DATABASE_REMEDIATION_DATA: {DATABASE_REMEDIATION_DATA}")
 
-# Database connection setup - using user authorization
-connection_pools = {}  # Store multiple connection pools for different databases
+# Database connection setup - using user authorization with direct connections
 
 def get_postgres_password():
     """Get PostgreSQL password using user authorization token"""
@@ -50,20 +48,17 @@ def get_postgres_password():
         st.error(f"❌ Failed to get user authorization token: {str(e)}")
         st.stop()
 
-def get_connection_pool(dbname=None):
-    """Get or create the connection pool for a specific database using user authorization."""
-    global connection_pools
-    
-    # Use default database if none specified
-    if dbname is None:
-        dbname = os.getenv('PGDATABASE')
-    
-    # Create a unique key for this user's connection pool
-    user_email, user_token = get_user_credentials()
-    pool_key = f"{dbname}_{user_email}"
-    
-    if pool_key not in connection_pools:
+def get_connection(dbname=None):
+    """Get a direct connection using user authorization (no pooling to avoid timeout issues)."""
+    try:
+        # Use default database if none specified
+        if dbname is None:
+            dbname = os.getenv('PGDATABASE')
+        
+        user_email, user_token = get_user_credentials()
         postgres_password = get_postgres_password()
+        
+        # Create direct connection without pooling to avoid timeout issues
         conn_string = (
             f"dbname={dbname} "
             f"user={os.getenv('PGUSER')} "
@@ -71,17 +66,19 @@ def get_connection_pool(dbname=None):
             f"host={os.getenv('PGHOST')} "
             f"port={os.getenv('PGPORT')} "
             f"sslmode={os.getenv('PGSSLMODE', 'require')} "
-            f"application_name={os.getenv('PGAPPNAME')}"
+            f"application_name={os.getenv('PGAPPNAME')} "
+            f"connect_timeout=10"
         )
-        connection_pools[pool_key] = ConnectionPool(conn_string, min_size=1, max_size=5)
-        logger.debug(f"Created connection pool for {pool_key}")
-    
-    return connection_pools[pool_key]
-
-def get_connection(dbname=None):
-    """Get a connection from the pool for a specific database using user authorization."""
-    try:
-        return get_connection_pool(dbname).connection()
+        
+        logger.debug(f"Creating direct connection to {dbname} for user {user_email}")
+        conn = psycopg.connect(conn_string)
+        
+        # Test the connection
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+        
+        return conn
+        
     except Exception as e:
         logger.error(f"Failed to get database connection: {str(e)}")
         st.error(f"❌ Database connection failed: {str(e)}")
@@ -146,10 +143,13 @@ def list_available_tables():
             st.error(f"Error listing tables: {str(e)}")
             return pd.DataFrame()
 
-def create_intervention_table():
-    """Create interventions table in public schema if it doesn't exist"""
+
+
+def submit_intervention(student_id, intervention_type, details, created_by):
+    """Submit intervention to database"""
     with get_connection(DATABASE_REMEDIATION_DATA) as conn:
         with conn.cursor() as cur:
+            # First ensure the table exists
             create_table_query = """
             CREATE TABLE IF NOT EXISTS public.student_interventions (
                 student_id VARCHAR(255),
@@ -162,16 +162,6 @@ def create_intervention_table():
             )
             """
             
-            try:
-                cur.execute(create_table_query)
-                conn.commit()
-            except Exception as e:
-                st.error(f"Error creating interventions table: {str(e)}")
-
-def submit_intervention(student_id, intervention_type, details, created_by):
-    """Submit intervention to database"""
-    with get_connection(DATABASE_REMEDIATION_DATA) as conn:
-        with conn.cursor() as cur:
             insert_query = """
             INSERT INTO public.student_interventions
             (student_id, intervention_type, intervention_details, created_by)
@@ -179,6 +169,9 @@ def submit_intervention(student_id, intervention_type, details, created_by):
             """
             
             try:
+                # Create table if it doesn't exist
+                cur.execute(create_table_query)
+                # Insert the intervention
                 cur.execute(insert_query, (student_id, intervention_type, details, created_by))
                 conn.commit()
             except Exception as e:
@@ -206,8 +199,7 @@ def main():
         initial_sidebar_state="expanded"
     )
     
-    # Initialize intervention table
-    create_intervention_table()
+    # Note: Intervention table will be created when needed
     
     # Header
     st.title("🎓 Student Risk Management System")
