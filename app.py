@@ -19,97 +19,74 @@ load_dotenv()
 # Database configuration variables
 DATABASE_SYNCED_DATA = os.getenv("DATABASE_SYNCED_DATA", "akshay_university_sample")
 DATABASE_REMEDIATION_DATA = os.getenv("DATABASE_REMEDIATION_DATA", "akshay_student_remediation")
-DATABRICKS_CLIENT_ID = os.getenv("DATABRICKS_CLIENT_ID")
-DATABRICKS_CLIENT_SECRET = os.getenv("DATABRICKS_CLIENT_SECRET")
-USER_EMAIL = st.context.headers.get('X-Forwarded-Email')
-USER_TOKEN = st.context.headers.get('X-Forwarded-Access-Token')
-PAT_TOKEN = os.getenv('secret')
+def get_user_credentials():
+    """Get user authorization credentials from Streamlit headers"""
+    user_email = st.context.headers.get('x-forwarded-email')
+    user_token = st.context.headers.get('x-forwarded-access-token')
+    
+    logger.debug(f"User email: {user_email}")
+    logger.debug(f"User token present: {bool(user_token)}")
+    
+    if not user_token:
+        st.error("❌ User authorization token not found. Please ensure the app has proper user authorization scopes configured.")
+        st.info("This app requires user authorization to access your data with your permissions.")
+        st.stop()
+    
+    return user_email, user_token
 
 logger.debug(f"DATABASE_SYNCED_DATA: {DATABASE_SYNCED_DATA}")
 logger.debug(f"DATABASE_REMEDIATION_DATA: {DATABASE_REMEDIATION_DATA}")
-logger.debug(f"DATABRICKS_CLIENT_ID: {DATABRICKS_CLIENT_ID}")
-logger.debug(f"DATABRICKS_CLIENT_SECRET: {DATABRICKS_CLIENT_SECRET}")
-logger.debug(f"USER_EMAIL: {USER_EMAIL}")
-logger.debug(f"USER_TOKEN: {USER_TOKEN}")
 
-
-# Database connection setup
-workspace_client = sdk.WorkspaceClient(
-    host="https://e2-demo-field-eng.cloud.databricks.com",
-    token=PAT_TOKEN
-)
-postgres_password = None
-last_password_refresh = 0
-connection_pool = None
+# Database connection setup - using user authorization
 connection_pools = {}  # Store multiple connection pools for different databases
 
-def refresh_oauth_token():
-    """Refresh OAuth token if expired."""
-    global postgres_password, last_password_refresh
-    if postgres_password is None or time.time() - last_password_refresh > 900:
-        print("Refreshing PostgreSQL OAuth token")
-        try:
-            postgres_password = workspace_client.config.oauth_token().access_token
-            logger.debug(f"PostgreSQL OAuth token refreshed: {postgres_password}")
-            last_password_refresh = time.time()
-        except Exception as e:
-            st.error(f"❌ Failed to refresh OAuth token: {str(e)}")
-            st.stop()
+def get_postgres_password():
+    """Get PostgreSQL password using user authorization token"""
+    try:
+        user_email, user_token = get_user_credentials()
+        logger.debug("Using user authorization token for PostgreSQL connection")
+        return user_token
+    except Exception as e:
+        st.error(f"❌ Failed to get user authorization token: {str(e)}")
+        st.stop()
 
 def get_connection_pool(dbname=None):
-    """Get or create the connection pool for a specific database."""
-    global connection_pool, connection_pools
+    """Get or create the connection pool for a specific database using user authorization."""
+    global connection_pools
     
     # Use default database if none specified
     if dbname is None:
         dbname = os.getenv('PGDATABASE')
     
-    # For backward compatibility, use the original connection_pool for default database
-    if dbname == os.getenv('PGDATABASE'):
-        if connection_pool is None:
-            refresh_oauth_token()
-            conn_string = (
-                f"dbname={dbname} "
-                f"user={os.getenv('PGUSER')} "
-                f"password={postgres_password} "
-                f"host={os.getenv('PGHOST')} "
-                f"port={os.getenv('PGPORT')} "
-                f"sslmode={os.getenv('PGSSLMODE', 'require')} "
-                f"application_name={os.getenv('PGAPPNAME')}"
-            )
-            connection_pool = ConnectionPool(conn_string, min_size=2, max_size=10)
-        return connection_pool
-    else:
-        # Use separate connection pools for other databases
-        if dbname not in connection_pools:
-            refresh_oauth_token()
-            conn_string = (
-                f"dbname={dbname} "
-                f"user={os.getenv('PGUSER')} "
-                f"password={postgres_password} "
-                f"host={os.getenv('PGHOST')} "
-                f"port={os.getenv('PGPORT')} "
-                f"sslmode={os.getenv('PGSSLMODE', 'require')} "
-                f"application_name={os.getenv('PGAPPNAME')}"
-            )
-            connection_pools[dbname] = ConnectionPool(conn_string, min_size=2, max_size=10)
-        return connection_pools[dbname]
+    # Create a unique key for this user's connection pool
+    user_email, user_token = get_user_credentials()
+    pool_key = f"{dbname}_{user_email}"
+    
+    if pool_key not in connection_pools:
+        postgres_password = get_postgres_password()
+        conn_string = (
+            f"dbname={dbname} "
+            f"user={os.getenv('PGUSER')} "
+            f"password={postgres_password} "
+            f"host={os.getenv('PGHOST')} "
+            f"port={os.getenv('PGPORT')} "
+            f"sslmode={os.getenv('PGSSLMODE', 'require')} "
+            f"application_name={os.getenv('PGAPPNAME')}"
+        )
+        connection_pools[pool_key] = ConnectionPool(conn_string, min_size=1, max_size=5)
+        logger.debug(f"Created connection pool for {pool_key}")
+    
+    return connection_pools[pool_key]
 
 def get_connection(dbname=None):
-    """Get a connection from the pool for a specific database."""
-    global connection_pool, connection_pools
-    
-    # Recreate pools if token expired
-    if postgres_password is None or time.time() - last_password_refresh > 900:
-        if connection_pool:
-            connection_pool.close()
-            connection_pool = None
-        for pool in connection_pools.values():
-            pool.close()
-        connection_pools.clear()
-    
-    return get_connection_pool(dbname).connection()
-
+    """Get a connection from the pool for a specific database using user authorization."""
+    try:
+        return get_connection_pool(dbname).connection()
+    except Exception as e:
+        logger.error(f"Failed to get database connection: {str(e)}")
+        st.error(f"❌ Database connection failed: {str(e)}")
+        st.info("Please ensure you have proper permissions to access the database.")
+        st.stop()
 
 
 # Student Risk Management Functions
@@ -267,17 +244,23 @@ def show_student_dashboard():
     with st.sidebar:
         if st.checkbox("🔧 Debug Mode"):
             st.subheader("Debug Information")
-            st.write(f"**Database:** {DATABASE_SYNCED_DATA}")
-            st.write(f"**Schema:** public")
-            
-            if st.button("List Available Tables"):
-                with st.spinner("Listing tables..."):
-                    tables_df = list_available_tables()
-                    if not tables_df.empty:
-                        st.write("**Available Tables in Public Schema:**")
-                        st.dataframe(tables_df)
-                    else:
-                        st.write("No student/risk tables found in public schema")
+            try:
+                user_email, user_token = get_user_credentials()
+                st.write(f"**User:** {user_email}")
+                st.write(f"**Database:** {DATABASE_SYNCED_DATA}")
+                st.write(f"**Schema:** public")
+                st.write(f"**Auth Method:** User Authorization")
+                
+                if st.button("List Available Tables"):
+                    with st.spinner("Listing tables..."):
+                        tables_df = list_available_tables()
+                        if not tables_df.empty:
+                            st.write("**Available Tables in Public Schema:**")
+                            st.dataframe(tables_df)
+                        else:
+                            st.write("No student/risk tables found in public schema")
+            except Exception as e:
+                st.error(f"Debug info error: {str(e)}")
     
     try:
         # Load data
