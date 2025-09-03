@@ -95,7 +95,7 @@ def get_connection(dbname=None):
 # Student Risk Management Functions
 
 
-# @st.cache_data(ttl=300)  # Cache for 5 minutes
+@st.cache_data(ttl=300)  # Cache for 5 minutes
 def load_student_risk_data():
     """Load student risk data from database"""
     with get_connection(DATABASE_SYNCED_DATA) as conn:
