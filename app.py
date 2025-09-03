@@ -59,9 +59,10 @@ def get_connection(dbname=None):
         postgres_password = get_postgres_password()
         
         # Create direct connection without pooling to avoid timeout issues
+        # Use the user email from the OAuth token instead of PGUSER
         conn_string = (
             f"dbname={dbname} "
-            f"user={os.getenv('PGUSER')} "
+            f"user={user_email} "
             f"password={postgres_password} "
             f"host={os.getenv('PGHOST')} "
             f"port={os.getenv('PGPORT')} "
@@ -71,11 +72,16 @@ def get_connection(dbname=None):
         )
         
         logger.debug(f"Creating direct connection to {dbname} for user {user_email}")
+        logger.debug(f"Connection string (password hidden): dbname={dbname} user={user_email} host={os.getenv('PGHOST')} port={os.getenv('PGPORT')}")
+        
         conn = psycopg.connect(conn_string)
         
-        # Test the connection
+        # Test the connection and log current user
         with conn.cursor() as cur:
             cur.execute("SELECT 1")
+            cur.execute("SELECT current_user, session_user")
+            current_user, session_user = cur.fetchone()
+            logger.debug(f"Connected as current_user: {current_user}, session_user: {session_user}")
         
         return conn
         
@@ -238,10 +244,27 @@ def show_student_dashboard():
             st.subheader("Debug Information")
             try:
                 user_email, user_token = get_user_credentials()
-                st.write(f"**User:** {user_email}")
+                st.write(f"**User Email:** {user_email}")
                 st.write(f"**Database:** {DATABASE_SYNCED_DATA}")
                 st.write(f"**Schema:** public")
                 st.write(f"**Auth Method:** User Authorization")
+                st.write(f"**DB Host:** {os.getenv('PGHOST')}")
+                st.write(f"**DB Port:** {os.getenv('PGPORT')}")
+                st.write(f"**App Name:** {os.getenv('PGAPPNAME')}")
+                
+                if st.button("Test Connection"):
+                    with st.spinner("Testing connection..."):
+                        try:
+                            with get_connection(DATABASE_SYNCED_DATA) as conn:
+                                with conn.cursor() as cur:
+                                    cur.execute("SELECT current_user, session_user, version()")
+                                    current_user, session_user, version = cur.fetchone()
+                                    st.success("✅ Connection successful!")
+                                    st.write(f"**Current User:** {current_user}")
+                                    st.write(f"**Session User:** {session_user}")
+                                    st.write(f"**PostgreSQL Version:** {version}")
+                        except Exception as conn_e:
+                            st.error(f"Connection test failed: {str(conn_e)}")
                 
                 if st.button("List Available Tables"):
                     with st.spinner("Listing tables..."):
