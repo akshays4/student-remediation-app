@@ -2,7 +2,7 @@ import streamlit as st
 import psycopg
 import pandas as pd
 import os
-import time
+# import time
 from databricks import sdk
 import plotly.express as px
 from dotenv import load_dotenv
@@ -194,6 +194,45 @@ def get_risk_color(risk_category):
     }
     return colors.get(risk_category, '#808080')
 
+def get_priority_color(priority):
+    """Return color based on intervention priority"""
+    colors = {
+        'High': '#FF4B4B',
+        'Medium': '#FFA500',
+        'Low': '#00CC88'
+    }
+    return colors.get(priority, '#808080')
+
+def load_scheduled_remediations():
+    """Load scheduled remediations from database"""
+    with get_connection(DATABASE_REMEDIATION_DATA) as conn:
+        query = """
+        SELECT 
+            student_id,
+            intervention_type,
+            intervention_details,
+            created_date,
+            status,
+            created_by
+        FROM public.student_interventions
+        WHERE status = 'Pending'
+        ORDER BY 
+            CASE 
+                WHEN intervention_details LIKE '%Priority: High%' THEN 1
+                WHEN intervention_details LIKE '%Priority: Medium%' THEN 2
+                WHEN intervention_details LIKE '%Priority: Low%' THEN 3
+                ELSE 4
+            END,
+            created_date DESC
+        """
+        
+        try:
+            df = pd.read_sql_query(query, conn)
+            return df
+        except Exception as e:
+            st.error(f"Error loading scheduled remediations: {str(e)}")
+            return pd.DataFrame()
+
 
 # Streamlit UI
 def main():
@@ -221,8 +260,8 @@ def main():
     # Page selection with session state
     page = st.sidebar.selectbox(
         "Choose a page", 
-        ["Student Risk Dashboard", "Create Intervention"],
-        index=0 if st.session_state.page == "Student Risk Dashboard" else 1,
+        ["Student Risk Dashboard", "Create Intervention", "Scheduled Remediations"],
+        index=0 if st.session_state.page == "Student Risk Dashboard" else (1 if st.session_state.page == "Create Intervention" else 2),
         key="page_selector"
     )
     
@@ -234,6 +273,8 @@ def main():
         show_student_dashboard()
     elif page == "Create Intervention":
         show_create_intervention()
+    elif page == "Scheduled Remediations":
+        show_scheduled_remediations()
 
 def show_student_dashboard():
     st.header("📊 Students at Risk Overview")
@@ -461,7 +502,9 @@ def show_create_intervention():
             )
         
         with col2:
-            created_by = st.text_input("Created By (Your Name)")
+            # Get user email and make it uneditable
+            user_email, _ = get_user_credentials()
+            created_by = st.text_input("Created By (Email)", value=user_email, disabled=True)
             priority = st.selectbox("Priority", ["High", "Medium", "Low"])
         
         # Intervention details based on type
@@ -522,6 +565,114 @@ def show_create_intervention():
                 st.error("Please fill in all required fields.")
 
 
+
+def show_scheduled_remediations():
+    st.header("📅 Scheduled Remediations")
+    st.markdown("---")
+    
+    try:
+        # Load scheduled remediations
+        with st.spinner("Loading scheduled remediations..."):
+            df = load_scheduled_remediations()
+        
+        if df.empty:
+            st.info("📋 No scheduled remediations found.")
+            st.markdown("All interventions have been completed or no interventions have been created yet.")
+            return
+        
+        # Summary metrics
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            total_remediations = len(df)
+            st.metric("Total Scheduled", total_remediations)
+        
+        with col2:
+            high_priority = len(df[df['intervention_details'].str.contains('Priority: High', na=False)])
+            st.metric("High Priority", high_priority, delta=f"{high_priority/total_remediations*100:.1f}%")
+        
+        with col3:
+            medium_priority = len(df[df['intervention_details'].str.contains('Priority: Medium', na=False)])
+            st.metric("Medium Priority", medium_priority, delta=f"{medium_priority/total_remediations*100:.1f}%")
+        
+        with col4:
+            low_priority = len(df[df['intervention_details'].str.contains('Priority: Low', na=False)])
+            st.metric("Low Priority", low_priority, delta=f"{low_priority/total_remediations*100:.1f}%")
+        
+        st.markdown("---")
+        
+        # Priority color legend
+        st.markdown("**Priority Color Key:**")
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.markdown(f'<div style="display: flex; align-items: center;"><div style="width: 20px; height: 20px; background-color: #FF4B4B; margin-right: 8px; border-radius: 3px;"></div><span>High Priority</span></div>', unsafe_allow_html=True)
+        
+        with col2:
+            st.markdown(f'<div style="display: flex; align-items: center;"><div style="width: 20px; height: 20px; background-color: #FFA500; margin-right: 8px; border-radius: 3px;"></div><span>Medium Priority</span></div>', unsafe_allow_html=True)
+        
+        with col3:
+            st.markdown(f'<div style="display: flex; align-items: center;"><div style="width: 20px; height: 20px; background-color: #00CC88; margin-right: 8px; border-radius: 3px;"></div><span>Low Priority</span></div>', unsafe_allow_html=True)
+        
+        st.markdown("---")
+        
+        # Display remediations
+        st.subheader(f"Scheduled Interventions ({len(df)} items)")
+        
+        for idx, remediation in df.iterrows():
+            # Extract priority from intervention details
+            priority = "Medium"  # Default
+            if "Priority: High" in str(remediation['intervention_details']):
+                priority = "High"
+            elif "Priority: Low" in str(remediation['intervention_details']):
+                priority = "Low"
+            
+            priority_color = get_priority_color(priority)
+            
+            with st.container():
+                col1, col2, col3, col4 = st.columns([3, 2, 2, 1])
+                
+                with col1:
+                    st.markdown(f"""
+                    <div style="padding: 15px; border-left: 4px solid {priority_color}; margin: 10px 0; background-color: {priority_color}10; border-radius: 5px;">
+                        <h4 style="margin: 0; color: {priority_color};">{remediation['intervention_type']}</h4>
+                        <p style="margin: 5px 0; color: gray;"><strong>Student ID:</strong> {remediation['student_id']}</p>
+                        <p style="margin: 5px 0; color: gray;"><strong>Priority:</strong> {priority}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with col2:
+                    st.write(f"**Created:** {remediation['created_date'].strftime('%Y-%m-%d %H:%M')}")
+                    st.write(f"**Status:** {remediation['status']}")
+                
+                with col3:
+                    st.write(f"**Created By:** {remediation['created_by']}")
+                
+                with col4:
+                    if st.button("View Details", key=f"view_{idx}"):
+                        with st.expander("Intervention Details", expanded=True):
+                            st.text_area("Full Details", value=remediation['intervention_details'], height=200, disabled=True)
+                    
+                    if st.button("Mark Complete", key=f"complete_{idx}"):
+                        # Update status to completed
+                        try:
+                            with get_connection(DATABASE_REMEDIATION_DATA) as conn:
+                                with conn.cursor() as cur:
+                                    update_query = """
+                                    UPDATE public.student_interventions 
+                                    SET status = 'Completed' 
+                                    WHERE student_id = %s AND created_date = %s
+                                    """
+                                    cur.execute(update_query, (remediation['student_id'], remediation['created_date']))
+                                    conn.commit()
+                            st.success("✅ Intervention marked as completed!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Error updating intervention: {str(e)}")
+        
+    except Exception as e:
+        st.error(f"Error loading scheduled remediations: {str(e)}")
+        st.info("Please check your database connection and permissions.")
 
 if __name__ == "__main__":
     main() 
