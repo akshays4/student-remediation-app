@@ -7,6 +7,9 @@ from databricks import sdk
 import plotly.express as px
 from dotenv import load_dotenv
 import logging
+import requests
+import json
+from typing import Dict, List, Optional
 
 
 logging.basicConfig(level=logging.DEBUG)
@@ -17,6 +20,11 @@ load_dotenv()
 
 # Database configuration variables
 DATABASE_REMEDIATION_DATA = os.getenv("DATABASE_REMEDIATION_DATA", "akshay_student_remediation")
+
+# Databricks Model Serving Endpoint Configuration
+SERVING_ENDPOINT = os.getenv("SERVING_ENDPOINT")
+DATABRICKS_HOST = os.getenv("DATABRICKS_HOST")
+DATABRICKS_TOKEN = os.getenv("DATABRICKS_TOKEN")
 def get_user_credentials():
     """Get user authorization credentials from Streamlit headers"""
     user_email = st.context.headers.get('x-forwarded-email')
@@ -88,6 +96,221 @@ def get_connection(dbname=None):
         st.error(f"❌ Database connection failed: {str(e)}")
         st.info("Please ensure you have proper permissions to access the database.")
         st.stop()
+
+
+# LLM-Powered Intervention Recommendation Functions
+
+def call_databricks_serving_endpoint(prompt: str, max_tokens: int = 500) -> Optional[str]:
+    """Call Databricks model serving endpoint for LLM inference"""
+    if not SERVING_ENDPOINT or not DATABRICKS_HOST or not DATABRICKS_TOKEN:
+        logger.warning("Databricks serving endpoint configuration missing")
+        return None
+    
+    try:
+        # Construct the full endpoint URL
+        endpoint_url = f"https://{DATABRICKS_HOST}/serving-endpoints/{SERVING_ENDPOINT}/invocations"
+        
+        headers = {
+            "Authorization": f"Bearer {DATABRICKS_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        
+        # Prepare the request payload (adjust based on your model's expected format)
+        payload = {
+            "inputs": {
+                "prompt": prompt,
+                "max_tokens": max_tokens,
+                "temperature": 0.7,
+                "top_p": 0.9
+            }
+        }
+        
+        logger.debug(f"Calling serving endpoint: {endpoint_url}")
+        response = requests.post(endpoint_url, headers=headers, json=payload, timeout=30)
+        response.raise_for_status()
+        
+        result = response.json()
+        
+        # Extract the generated text (adjust based on your model's response format)
+        if "predictions" in result and len(result["predictions"]) > 0:
+            return result["predictions"][0].get("generated_text", "").strip()
+        elif "choices" in result and len(result["choices"]) > 0:
+            return result["choices"][0].get("text", "").strip()
+        else:
+            logger.warning(f"Unexpected response format: {result}")
+            return None
+            
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Error calling serving endpoint: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error in LLM call: {str(e)}")
+        return None
+
+def generate_intervention_recommendations(student_data: Dict) -> Dict[str, any]:
+    """Generate intelligent intervention recommendations using LLM"""
+    
+    # Create a comprehensive prompt with student context
+    prompt = f"""
+You are an expert academic advisor at a university. Based on the following student information, provide personalized intervention recommendations.
+
+Student Profile:
+- Name: {student_data.get('full_name', 'N/A')}
+- Student ID: {student_data.get('student_id', 'N/A')}
+- Major: {student_data.get('major', 'N/A')}
+- Year Level: {student_data.get('year_level', 'N/A')}
+- Current GPA: {student_data.get('gpa', 'N/A')}
+- Courses Enrolled: {student_data.get('courses_enrolled', 'N/A')}
+- Failing Grades: {student_data.get('failing_grades', 'N/A')}
+- Risk Category: {student_data.get('risk_category', 'N/A')}
+- Activity Status: {student_data.get('activity_status', 'N/A')}
+
+Please provide:
+1. Top 3 recommended intervention types (from: Academic Meeting, Study Plan Assignment, Tutoring Referral, Counseling Referral, Financial Aid Consultation, Career Guidance Session, Peer Mentoring Program, Academic Probation Review)
+2. Priority level (High, Medium, Low) for each recommendation
+3. Specific action items for each intervention
+4. Expected timeline for implementation
+5. Success metrics to track
+
+Format your response as a structured recommendation that an academic advisor can immediately act upon.
+"""
+
+    # Call the LLM
+    llm_response = call_databricks_serving_endpoint(prompt, max_tokens=800)
+    
+    if not llm_response:
+        # Fallback to rule-based recommendations if LLM fails
+        return generate_fallback_recommendations(student_data)
+    
+    return {
+        "llm_recommendations": llm_response,
+        "student_context": student_data,
+        "generated_at": pd.Timestamp.now().isoformat(),
+        "source": "databricks_llm"
+    }
+
+def generate_fallback_recommendations(student_data: Dict) -> Dict[str, any]:
+    """Generate rule-based recommendations as fallback when LLM is unavailable"""
+    
+    risk_category = student_data.get('risk_category', '')
+    gpa = float(student_data.get('gpa', 0))
+    failing_grades = int(student_data.get('failing_grades', 0))
+    
+    recommendations = []
+    
+    if risk_category == 'High Risk':
+        recommendations = [
+            {
+                "type": "Academic Meeting",
+                "priority": "High",
+                "details": "Immediate one-on-one meeting to assess challenges and create action plan",
+                "timeline": "Within 48 hours"
+            },
+            {
+                "type": "Tutoring Referral", 
+                "priority": "High",
+                "details": "Connect with subject-specific tutoring for failing courses",
+                "timeline": "Within 1 week"
+            },
+            {
+                "type": "Counseling Referral",
+                "priority": "Medium",
+                "details": "Assess for personal/emotional factors affecting academic performance",
+                "timeline": "Within 2 weeks"
+            }
+        ]
+    elif risk_category == 'Medium Risk':
+        recommendations = [
+            {
+                "type": "Study Plan Assignment",
+                "priority": "Medium", 
+                "details": "Develop structured study schedule and time management strategies",
+                "timeline": "Within 1 week"
+            },
+            {
+                "type": "Academic Meeting",
+                "priority": "Medium",
+                "details": "Check-in meeting to monitor progress and adjust support",
+                "timeline": "Within 1 week"
+            }
+        ]
+    else:
+        recommendations = [
+            {
+                "type": "Academic Meeting",
+                "priority": "Low",
+                "details": "Regular check-in to maintain positive trajectory",
+                "timeline": "Within 2 weeks"
+            }
+        ]
+    
+    return {
+        "llm_recommendations": f"Rule-based recommendations for {student_data.get('full_name', 'student')}:\n\n" + 
+                             "\n".join([f"• {rec['type']} ({rec['priority']} Priority): {rec['details']}" for rec in recommendations]),
+        "structured_recommendations": recommendations,
+        "student_context": student_data,
+        "generated_at": pd.Timestamp.now().isoformat(),
+        "source": "rule_based_fallback"
+    }
+
+def generate_personalized_intervention_details(intervention_type: str, student_data: Dict, priority: str) -> str:
+    """Generate personalized intervention details using LLM"""
+    
+    prompt = f"""
+Create detailed, personalized intervention plan for a university student.
+
+Student Context:
+- Name: {student_data.get('full_name', 'N/A')}
+- Major: {student_data.get('major', 'N/A')}
+- Year: {student_data.get('year_level', 'N/A')}
+- GPA: {student_data.get('gpa', 'N/A')}
+- Risk Level: {student_data.get('risk_category', 'N/A')}
+- Failing Courses: {student_data.get('failing_grades', 0)} out of {student_data.get('courses_enrolled', 0)}
+
+Intervention Type: {intervention_type}
+Priority Level: {priority}
+
+Provide a detailed, actionable intervention plan including:
+1. Specific objectives
+2. Recommended approach/methodology
+3. Timeline and milestones
+4. Resources needed
+5. Success metrics
+6. Follow-up actions
+
+Keep the response practical and implementable by academic advisors.
+"""
+
+    llm_response = call_databricks_serving_endpoint(prompt, max_tokens=600)
+    
+    if llm_response:
+        return f"Priority: {priority}\n\nAI-Generated Intervention Plan:\n{llm_response}"
+    else:
+        # Fallback to basic template
+        return f"Priority: {priority}\n\nIntervention Type: {intervention_type}\nStudent: {student_data.get('full_name', 'N/A')}\nRecommended for {student_data.get('risk_category', 'N/A')} student in {student_data.get('major', 'N/A')}"
+
+def get_rule_based_recommendations_text(student_data: Dict) -> str:
+    """Generate formatted rule-based recommendations text for copying to additional details"""
+    fallback_recommendations = generate_fallback_recommendations(student_data)
+    
+    if 'structured_recommendations' in fallback_recommendations:
+        recommendations = fallback_recommendations['structured_recommendations']
+        
+        text = f"Rule-Based Recommendations for {student_data.get('full_name', 'Student')}:\n\n"
+        
+        for i, rec in enumerate(recommendations, 1):
+            text += f"{i}. {rec['type']} ({rec['priority']} Priority)\n"
+            text += f"   Details: {rec['details']}\n"
+            text += f"   Timeline: {rec['timeline']}\n\n"
+        
+        text += f"Generated based on:\n"
+        text += f"- Risk Category: {student_data.get('risk_category', 'N/A')}\n"
+        text += f"- GPA: {student_data.get('gpa', 'N/A')}\n"
+        text += f"- Failing Grades: {student_data.get('failing_grades', 0)}/{student_data.get('courses_enrolled', 0)}\n"
+        
+        return text
+    else:
+        return fallback_recommendations.get('llm_recommendations', 'No recommendations available')
 
 
 # Student Risk Management Functions
@@ -291,6 +514,23 @@ def show_student_dashboard():
                 st.write(f"**DB Port:** {os.getenv('PGPORT')}")
                 st.write(f"**App Name:** {os.getenv('PGAPPNAME')}")
                 
+                st.markdown("**LLM Configuration:**")
+                st.write(f"**Serving Endpoint:** {SERVING_ENDPOINT or 'Not configured'}")
+                st.write(f"**Databricks Host:** {DATABRICKS_HOST or 'Not configured'}")
+                st.write(f"**Token Available:** {'Yes' if DATABRICKS_TOKEN else 'No'}")
+                
+                if st.button("Test LLM Endpoint"):
+                    if SERVING_ENDPOINT and DATABRICKS_HOST and DATABRICKS_TOKEN:
+                        with st.spinner("Testing LLM endpoint..."):
+                            test_response = call_databricks_serving_endpoint("Hello, this is a test.", max_tokens=50)
+                            if test_response:
+                                st.success("✅ LLM endpoint is working!")
+                                st.write(f"**Test Response:** {test_response}")
+                            else:
+                                st.error("❌ LLM endpoint test failed")
+                    else:
+                        st.error("❌ LLM endpoint not properly configured")
+                
                 if st.button("Test Connection"):
                     with st.spinner("Testing connection..."):
                         try:
@@ -431,15 +671,75 @@ def show_student_dashboard():
                     st.write(f"**Failing:** {student['failing_grades']}/{student['courses_enrolled']}")
                 
                 with col4:
-                    if st.button(f"Create Intervention", key=f"btn_{student['student_id']}"):
-                        st.session_state.selected_student = student['student_id']
-                        st.session_state.selected_student_name = student['full_name']
-                        st.session_state.selected_student_major = student['major']
-                        st.session_state.selected_student_year = student['year_level']
-                        st.session_state.selected_student_gpa = student['gpa']
-                        st.session_state.selected_student_risk = student['risk_category']
-                        st.session_state.page = "Create Intervention"
-                        st.rerun()
+                    col4a, col4b = st.columns(2)
+                    
+                    with col4a:
+                        if st.button(f"🤖 AI Rec", key=f"ai_btn_{student['student_id']}", help="Get AI-powered intervention recommendations"):
+                            with st.spinner("Generating AI recommendations..."):
+                                student_dict = student.to_dict()
+                                recommendations = generate_intervention_recommendations(student_dict)
+                                
+                                # Store recommendations in session state
+                                st.session_state[f"recommendations_{student['student_id']}"] = recommendations
+                                st.rerun()
+                    
+                    with col4b:
+                        if st.button(f"Create", key=f"btn_{student['student_id']}", help="Create intervention manually"):
+                            st.session_state.selected_student = student['student_id']
+                            st.session_state.selected_student_name = student['full_name']
+                            st.session_state.selected_student_major = student['major']
+                            st.session_state.selected_student_year = student['year_level']
+                            st.session_state.selected_student_gpa = student['gpa']
+                            st.session_state.selected_student_risk = student['risk_category']
+                            st.session_state.page = "Create Intervention"
+                            st.rerun()
+                
+                # Display AI recommendations if available
+                if f"recommendations_{student['student_id']}" in st.session_state:
+                    recommendations = st.session_state[f"recommendations_{student['student_id']}"]
+                    
+                    with st.expander(f"🤖 AI Recommendations for {student['full_name']}", expanded=True):
+                        st.markdown("### AI-Generated Intervention Recommendations")
+                        
+                        # Display the LLM response
+                        st.markdown(recommendations["llm_recommendations"])
+                        
+                        # Add metadata
+                        col_meta1, col_meta2 = st.columns(2)
+                        with col_meta1:
+                            st.caption(f"Generated: {recommendations['generated_at']}")
+                        with col_meta2:
+                            st.caption(f"Source: {recommendations['source']}")
+                        
+                        # Quick action buttons
+                        st.markdown("---")
+                        col_action1, col_action2, col_action3 = st.columns(3)
+                        
+                        with col_action1:
+                            if st.button("📝 Create from AI Rec", key=f"create_ai_{student['student_id']}"):
+                                # Pre-populate intervention form with AI recommendations
+                                st.session_state.selected_student = student['student_id']
+                                st.session_state.selected_student_name = student['full_name']
+                                st.session_state.selected_student_major = student['major']
+                                st.session_state.selected_student_year = student['year_level']
+                                st.session_state.selected_student_gpa = student['gpa']
+                                st.session_state.selected_student_risk = student['risk_category']
+                                st.session_state.ai_recommendations = recommendations
+                                st.session_state.page = "Create Intervention"
+                                st.rerun()
+                        
+                        with col_action2:
+                            if st.button("🔄 Regenerate", key=f"regen_{student['student_id']}"):
+                                with st.spinner("Regenerating recommendations..."):
+                                    student_dict = student.to_dict()
+                                    new_recommendations = generate_intervention_recommendations(student_dict)
+                                    st.session_state[f"recommendations_{student['student_id']}"] = new_recommendations
+                                    st.rerun()
+                        
+                        with col_action3:
+                            if st.button("❌ Dismiss", key=f"dismiss_{student['student_id']}"):
+                                del st.session_state[f"recommendations_{student['student_id']}"]
+                                st.rerun()
         
     except Exception as e:
         st.error(f"Error loading data: {str(e)}")
@@ -447,6 +747,21 @@ def show_student_dashboard():
 
 def show_create_intervention():
     st.header("📝 Create Student Intervention")
+    
+    # Check if AI recommendations are available
+    ai_recommendations = st.session_state.get('ai_recommendations', None)
+    if ai_recommendations:
+        st.success("🤖 AI recommendations available! Use the suggestions below or create a custom intervention.")
+        
+        with st.expander("🤖 View AI Recommendations", expanded=True):
+            st.markdown(ai_recommendations["llm_recommendations"])
+            
+            if st.button("🗑️ Clear AI Recommendations"):
+                # Clear all AI-related session state
+                for key in ['ai_recommendations', 'ai_generated_details', 'ai_selected_intervention_type', 'ai_selected_priority']:
+                    if key in st.session_state:
+                        del st.session_state[key]
+                st.rerun()
     
     # Check if student was selected from dashboard
     if 'selected_student' in st.session_state:
@@ -473,71 +788,224 @@ def show_create_intervention():
         # Add a button to clear the selection and start fresh
         if st.button("🔄 Clear Selection & Start Fresh"):
             for key in ['selected_student', 'selected_student_name', 'selected_student_major', 
-                       'selected_student_year', 'selected_student_gpa', 'selected_student_risk']:
+                       'selected_student_year', 'selected_student_gpa', 'selected_student_risk',
+                       'ai_recommendations', 'ai_generated_details', 'ai_selected_intervention_type', 'ai_selected_priority']:
                 if key in st.session_state:
                     del st.session_state[key]
             st.rerun()
     else:
         default_student_id = ""
+    
+    # AI-Enhanced Details Generation (outside the form)
+    if 'selected_student' in st.session_state:
+        st.markdown("---")
+        st.subheader("🤖 AI-Powered Assistance")
+        
+        col_ai1, col_ai2, col_ai3 = st.columns([2, 1, 1])
+        
+        with col_ai1:
+            st.write("Generate personalized intervention details using AI based on student context.")
+        
+        with col_ai2:
+            # Create a mini form for AI generation parameters
+            with st.popover("🤖 Generate AI Details"):
+                st.write("**Configure AI Generation:**")
+                ai_intervention_type = st.selectbox(
+                    "Intervention Type for AI",
+                    [
+                        "Academic Meeting",
+                        "Study Plan Assignment", 
+                        "Tutoring Referral",
+                        "Counseling Referral",
+                        "Financial Aid Consultation",
+                        "Career Guidance Session",
+                        "Peer Mentoring Program",
+                        "Academic Probation Review"
+                    ],
+                    key="ai_intervention_type"
+                )
+                ai_priority = st.selectbox("Priority Level", ["High", "Medium", "Low"], key="ai_priority")
+                
+                if st.button("Generate Details", key="generate_ai_details_btn"):
+                    with st.spinner("Generating AI-enhanced details..."):
+                        student_data = {
+                            'student_id': st.session_state.selected_student,
+                            'full_name': st.session_state.get('selected_student_name', ''),
+                            'major': st.session_state.get('selected_student_major', ''),
+                            'year_level': st.session_state.get('selected_student_year', ''),
+                            'gpa': st.session_state.get('selected_student_gpa', 0.0),
+                            'risk_category': st.session_state.get('selected_student_risk', ''),
+                            'courses_enrolled': 5,  # Default values - could be enhanced
+                            'failing_grades': 1 if st.session_state.get('selected_student_risk') == 'High Risk' else 0
+                        }
+                        
+                        ai_details = generate_personalized_intervention_details(
+                            ai_intervention_type, student_data, ai_priority
+                        )
+                        
+                        # Store AI-generated details and intervention type in session state
+                        st.session_state['ai_generated_details'] = ai_details
+                        st.session_state['ai_selected_intervention_type'] = ai_intervention_type
+                        st.session_state['ai_selected_priority'] = ai_priority
+                        st.success("✅ AI details generated! They will be pre-filled in the form below.")
+                        st.rerun()
+        
+        with col_ai3:
+            if 'ai_generated_details' in st.session_state:
+                if st.button("🗑️ Clear AI Details"):
+                    # Clear all AI-related session state
+                    for key in ['ai_generated_details', 'ai_selected_intervention_type', 'ai_selected_priority']:
+                        if key in st.session_state:
+                            del st.session_state[key]
+                    st.rerun()
+        
+        # Display AI-generated details if available
+        if 'ai_generated_details' in st.session_state:
+            with st.expander("🤖 Generated AI Details Preview", expanded=True):
+                st.text_area("AI-Generated Details (will be used in form below)", 
+                           value=st.session_state['ai_generated_details'], 
+                           height=150, 
+                           disabled=True,
+                           key="ai_details_preview")
+                st.info("💡 These details will be automatically filled in the intervention details field below.")
+        
+        st.markdown("---")
         
     with st.form("intervention_form"):
         col1, col2 = st.columns(2)
         
         with col1:
             student_id = st.text_input("Student ID", value=default_student_id)
+            
+            # Use AI-generated intervention type as default if available
+            intervention_options = [
+                "Academic Meeting",
+                "Study Plan Assignment", 
+                "Tutoring Referral",
+                "Counseling Referral",
+                "Financial Aid Consultation",
+                "Career Guidance Session",
+                "Peer Mentoring Program",
+                "Academic Probation Review"
+            ]
+            
+            default_intervention_index = 0
+            if 'ai_selected_intervention_type' in st.session_state:
+                ai_type = st.session_state['ai_selected_intervention_type']
+                if ai_type in intervention_options:
+                    default_intervention_index = intervention_options.index(ai_type)
+            
             intervention_type = st.selectbox(
                 "Intervention Type",
-                [
-                    "Academic Meeting",
-                    "Study Plan Assignment", 
-                    "Tutoring Referral",
-                    "Counseling Referral",
-                    "Financial Aid Consultation",
-                    "Career Guidance Session",
-                    "Peer Mentoring Program",
-                    "Academic Probation Review"
-                ]
+                intervention_options,
+                index=default_intervention_index
             )
         
         with col2:
             # Get user email and make it uneditable
             user_email, _ = get_user_credentials()
             created_by = st.text_input("Created By (Email)", value=user_email, disabled=True)
-            priority = st.selectbox("Priority", ["High", "Medium", "Low"])
+            
+            # Use AI-generated priority as default if available
+            priority_options = ["High", "Medium", "Low"]
+            default_priority_index = 1  # Default to Medium
+            if 'ai_selected_priority' in st.session_state:
+                ai_priority = st.session_state['ai_selected_priority']
+                if ai_priority in priority_options:
+                    default_priority_index = priority_options.index(ai_priority)
+            
+            priority = st.selectbox("Priority", priority_options, index=default_priority_index)
         
         # Intervention details based on type
         st.subheader("Intervention Details")
+        
+        # Check if we have AI-generated details to pre-populate text areas
+        ai_details = st.session_state.get('ai_generated_details', '')
+        
+        # Show indicator if AI details are being used
+        if ai_details:
+            st.info("🤖 AI-generated details are pre-filled below. You can edit them as needed.")
         
         if intervention_type == "Academic Meeting":
             meeting_type = st.selectbox("Meeting Type", ["In-Person", "Virtual", "Phone"])
             meeting_date = st.date_input("Proposed Meeting Date")
             meeting_time = st.time_input("Proposed Meeting Time")
-            agenda = st.text_area("Meeting Agenda", placeholder="Discuss academic performance, identify challenges, create action plan...")
+            
+            agenda = st.text_area("Meeting Agenda", 
+                                value=ai_details,
+                                placeholder="Discuss academic performance, identify challenges, create action plan...")
             details = f"Meeting Type: {meeting_type}, Date: {meeting_date}, Time: {meeting_time}, Agenda: {agenda}"
             
         elif intervention_type == "Study Plan Assignment":
             study_duration = st.selectbox("Study Plan Duration", ["2 weeks", "1 month", "1 semester"])
             focus_areas = st.multiselect("Focus Areas", ["Time Management", "Note Taking", "Test Preparation", "Research Skills", "Writing Skills"])
-            goals = st.text_area("Specific Goals", placeholder="Improve GPA to 2.5, complete all assignments on time...")
+                
+            goals = st.text_area("Specific Goals", 
+                               value=ai_details,
+                               placeholder="Improve GPA to 2.5, complete all assignments on time...")
             details = f"Duration: {study_duration}, Focus Areas: {', '.join(focus_areas)}, Goals: {goals}"
             
         elif intervention_type == "Tutoring Referral":
             subjects = st.text_input("Subjects Needing Tutoring")
             tutoring_type = st.selectbox("Tutoring Type", ["Individual", "Group", "Online"])
             frequency = st.selectbox("Frequency", ["Once a week", "Twice a week", "Three times a week"])
-            details = f"Subjects: {subjects}, Type: {tutoring_type}, Frequency: {frequency}"
+                
+            tutor_notes = st.text_area("Additional Tutoring Details", 
+                                     value=ai_details,
+                                     placeholder="Specific tutoring requirements, learning objectives...")
+            details = f"Subjects: {subjects}, Type: {tutoring_type}, Frequency: {frequency}, Additional Details: {tutor_notes}"
             
         elif intervention_type == "Counseling Referral":
             counseling_type = st.selectbox("Counseling Type", ["Academic", "Personal", "Career", "Mental Health"])
             urgency = st.selectbox("Urgency", ["Immediate", "Within a week", "Within a month"])
-            reason = st.text_area("Reason for Referral")
+                
+            reason = st.text_area("Reason for Referral", 
+                                value=ai_details,
+                                placeholder="Describe the specific concerns and referral reasons...")
             details = f"Type: {counseling_type}, Urgency: {urgency}, Reason: {reason}"
             
         else:
-            details = st.text_area("Intervention Details", placeholder="Provide specific details about the intervention...")
+            # For other intervention types, use the full AI details
+            details = st.text_area("Intervention Details", 
+                                 value=ai_details,
+                                 placeholder="Provide specific details about the intervention...")
         
-        # Additional notes
-        additional_notes = st.text_area("Additional Notes", placeholder="Any additional information or special considerations...")
+        # Additional notes section with rule-based recommendations
+        col_notes1, col_notes2 = st.columns([1, 1])
+        
+        with col_notes1:
+            additional_notes = st.text_area("Additional Notes", 
+                                           placeholder="Any additional information or special considerations...",
+                                           height=200)
+        
+        with col_notes2:
+            if 'selected_student' in st.session_state:
+                st.markdown("**📋 Rule-Based Recommendations**")
+                
+                # Generate rule-based recommendations for the selected student
+                student_data = {
+                    'student_id': st.session_state.selected_student,
+                    'full_name': st.session_state.get('selected_student_name', ''),
+                    'major': st.session_state.get('selected_student_major', ''),
+                    'year_level': st.session_state.get('selected_student_year', ''),
+                    'gpa': st.session_state.get('selected_student_gpa', 0.0),
+                    'risk_category': st.session_state.get('selected_student_risk', ''),
+                    'courses_enrolled': 5,  # Default values - could be enhanced
+                    'failing_grades': 1 if st.session_state.get('selected_student_risk') == 'High Risk' else 0
+                }
+                
+                rule_based_text = get_rule_based_recommendations_text(student_data)
+                
+                # Display rule-based recommendations in a text area (read-only)
+                st.text_area("Generated for reference (you can copy text from here)",
+                           value=rule_based_text,
+                           height=200,
+                           disabled=True,
+                           key="rule_based_display")
+                
+                st.caption("💡 Copy any relevant recommendations to Additional Notes on the left")
+            else:
+                st.info("Select a student to see rule-based recommendations")
         
         # Combine all details
         full_details = f"Priority: {priority}\nDetails: {details}\nAdditional Notes: {additional_notes}"
@@ -553,7 +1021,8 @@ def show_create_intervention():
                     
                     # Clear session state
                     for key in ['selected_student', 'selected_student_name', 'selected_student_major', 
-                               'selected_student_year', 'selected_student_gpa', 'selected_student_risk']:
+                               'selected_student_year', 'selected_student_gpa', 'selected_student_risk',
+                               'ai_recommendations', 'ai_generated_details', 'ai_selected_intervention_type', 'ai_selected_priority']:
                         if key in st.session_state:
                             del st.session_state[key]
                         
