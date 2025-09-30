@@ -16,7 +16,6 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # Database configuration variables
-DATABASE_SYNCED_DATA = os.getenv("DATABASE_SYNCED_DATA", "akshay_university_sample")
 DATABASE_REMEDIATION_DATA = os.getenv("DATABASE_REMEDIATION_DATA", "akshay_student_remediation")
 def get_user_credentials():
     """Get user authorization credentials from Streamlit headers"""
@@ -33,7 +32,6 @@ def get_user_credentials():
     
     return user_email, user_token
 
-logger.debug(f"DATABASE_SYNCED_DATA: {DATABASE_SYNCED_DATA}")
 logger.debug(f"DATABASE_REMEDIATION_DATA: {DATABASE_REMEDIATION_DATA}")
 
 # Database connection setup - using user authorization with direct connections
@@ -98,8 +96,8 @@ def get_connection(dbname=None):
 @st.cache_data(ttl=300)  # Cache for 5 minutes
 def load_student_risk_data():
     """Load student risk data from database"""
-    with get_connection(DATABASE_SYNCED_DATA) as conn:
-        query = """
+    with get_connection(DATABASE_REMEDIATION_DATA) as conn:
+        query = f"""
         SELECT 
             student_id,
             full_name,
@@ -110,7 +108,7 @@ def load_student_risk_data():
             failing_grades,
             risk_category,
             activity_status
-        FROM akshay_university_sample.public.student_risk_analysis_gold
+        FROM {DATABASE_REMEDIATION_DATA}.public.student_risk_analysis_gold
         ORDER BY 
             CASE 
                 WHEN risk_category = 'High Risk' THEN 1
@@ -128,12 +126,12 @@ def load_student_risk_data():
             return df
         except Exception as e:
             st.error(f"Error loading student data: {str(e)}")
-            st.info("Please check that the 'akshay_university_sample.public.student_risk_analysis_gold' table exists and you have proper permissions.")
+            st.info(f"Please check that the '{DATABASE_REMEDIATION_DATA}.public.student_risk_analysis_gold' table exists and you have proper permissions.")
             return pd.DataFrame()
 
 def list_available_tables():
     """List available tables in public schema for debugging purposes"""
-    with get_connection(DATABASE_SYNCED_DATA) as conn:
+    with get_connection(DATABASE_REMEDIATION_DATA) as conn:
         try:
             # Query to list tables in public schema
             query = """
@@ -286,7 +284,7 @@ def show_student_dashboard():
             try:
                 user_email, user_token = get_user_credentials()
                 st.write(f"**User Email:** {user_email}")
-                st.write(f"**Database:** {DATABASE_SYNCED_DATA}")
+                st.write(f"**Database:** {DATABASE_REMEDIATION_DATA}")
                 st.write(f"**Schema:** public")
                 st.write(f"**Auth Method:** User Authorization")
                 st.write(f"**DB Host:** {os.getenv('PGHOST')}")
@@ -296,7 +294,7 @@ def show_student_dashboard():
                 if st.button("Test Connection"):
                     with st.spinner("Testing connection..."):
                         try:
-                            with get_connection(DATABASE_SYNCED_DATA) as conn:
+                            with get_connection(DATABASE_REMEDIATION_DATA) as conn:
                                 with conn.cursor() as cur:
                                     cur.execute("SELECT current_user, session_user, version()")
                                     current_user, session_user, version = cur.fetchone()
