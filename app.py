@@ -4,6 +4,8 @@ import pandas as pd
 import os
 # import time
 from databricks import sdk
+from databricks.sdk import WorkspaceClient
+from databricks_ai_bridge import ModelServingUserCredentials
 import plotly.express as px
 from dotenv import load_dotenv
 import logging
@@ -23,8 +25,7 @@ DATABASE_REMEDIATION_DATA = os.getenv("DATABASE_REMEDIATION_DATA", "akshay_stude
 
 # Databricks Model Serving Endpoint Configuration
 SERVING_ENDPOINT = os.getenv("SERVING_ENDPOINT")
-DATABRICKS_HOST = os.getenv("DATABRICKS_HOST")
-DATABRICKS_TOKEN = os.getenv("DATABRICKS_TOKEN")
+
 def get_user_credentials():
     """Get user authorization credentials from Streamlit headers"""
     user_email = st.context.headers.get('x-forwarded-email')
@@ -101,50 +102,52 @@ def get_connection(dbname=None):
 # LLM-Powered Intervention Recommendation Functions
 
 def call_databricks_serving_endpoint(prompt: str, max_tokens: int = 500) -> Optional[str]:
-    """Call Databricks model serving endpoint for LLM inference"""
-    if not SERVING_ENDPOINT or not DATABRICKS_HOST or not DATABRICKS_TOKEN:
-        logger.warning("Databricks serving endpoint configuration missing")
+    """Call Databricks model serving endpoint using on-behalf-of user authentication"""
+    if not SERVING_ENDPOINT:
+        logger.warning("Serving endpoint not configured")
         return None
     
     try:
-        # Construct the full endpoint URL
-        endpoint_url = f"https://{DATABRICKS_HOST}/serving-endpoints/{SERVING_ENDPOINT}/invocations"
+        # Configure Databricks SDK WorkspaceClient with on-behalf-of user authentication
+        user_client = WorkspaceClient(credentials_strategy=ModelServingUserCredentials())
         
-        headers = {
-            "Authorization": f"Bearer {DATABRICKS_TOKEN}",
-            "Content-Type": "application/json"
+        # gpt-oss models use the Foundation Model API format with messages
+        # Based on: https://www.databricks.com/blog/introducing-openais-new-open-models-databricks
+        request_data = {
+            "messages": [
+                {
+                    "role": "user", 
+                    "content": prompt
+                }
+            ],
+            "max_tokens": max_tokens,
+            "temperature": 0.7,
+            "top_p": 0.9
         }
         
-        # Prepare the request payload (adjust based on your model's expected format)
-        payload = {
-            "inputs": {
-                "prompt": prompt,
-                "max_tokens": max_tokens,
-                "temperature": 0.7,
-                "top_p": 0.9
-            }
-        }
+        logger.debug(f"Calling gpt-oss endpoint with payload: {request_data}")
         
-        logger.debug(f"Calling serving endpoint: {endpoint_url}")
-        response = requests.post(endpoint_url, headers=headers, json=payload, timeout=30)
-        response.raise_for_status()
+        # Call the serving endpoint with user credentials
+        response = user_client.serving_endpoints.query(
+            name=SERVING_ENDPOINT,
+            inputs=request_data
+        )
         
-        result = response.json()
+        # Extract the generated text from gpt-oss response
+        logger.debug(f"Response received: {response}")
         
-        # Extract the generated text (adjust based on your model's response format)
-        if "predictions" in result and len(result["predictions"]) > 0:
-            return result["predictions"][0].get("generated_text", "").strip()
-        elif "choices" in result and len(result["choices"]) > 0:
-            return result["choices"][0].get("text", "").strip()
-        else:
-            logger.warning(f"Unexpected response format: {result}")
-            return None
-            
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Error calling serving endpoint: {str(e)}")
+        # gpt-oss uses OpenAI-compatible format with choices
+        if hasattr(response, 'choices') and response.choices:
+            choice = response.choices[0]
+            if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
+                return choice.message.content.strip()
+        
+        # If the above didn't work, log the issue
+        logger.warning(f"Unexpected gpt-oss response format: {type(response)} - {response}")
         return None
+            
     except Exception as e:
-        logger.error(f"Unexpected error in LLM call: {str(e)}")
+        logger.debug(f"Skipping Model Serving Endpoint due to error: {str(e)}")
         return None
 
 def generate_intervention_recommendations(student_data: Dict) -> Dict[str, any]:
@@ -516,20 +519,23 @@ def show_student_dashboard():
                 
                 st.markdown("**LLM Configuration:**")
                 st.write(f"**Serving Endpoint:** {SERVING_ENDPOINT or 'Not configured'}")
-                st.write(f"**Databricks Host:** {DATABRICKS_HOST or 'Not configured'}")
-                st.write(f"**Token Available:** {'Yes' if DATABRICKS_TOKEN else 'No'}")
+                st.write(f"**Model Type:** OpenAI gpt-oss (Foundation Model API)")
+                st.write(f"**Authentication:** On-behalf-of user authentication")
+                st.write(f"**SDK Integration:** Databricks AI Bridge")
+                st.write(f"**Context Window:** 131k tokens")
+                st.write(f"**Features:** Chain-of-thought reasoning, tool use")
                 
                 if st.button("Test LLM Endpoint"):
-                    if SERVING_ENDPOINT and DATABRICKS_HOST and DATABRICKS_TOKEN:
-                        with st.spinner("Testing LLM endpoint..."):
+                    if SERVING_ENDPOINT:
+                        with st.spinner("Testing LLM endpoint with user credentials..."):
                             test_response = call_databricks_serving_endpoint("Hello, this is a test.", max_tokens=50)
                             if test_response:
                                 st.success("✅ LLM endpoint is working!")
                                 st.write(f"**Test Response:** {test_response}")
                             else:
-                                st.error("❌ LLM endpoint test failed")
+                                st.error("❌ LLM endpoint test failed - check permissions or endpoint configuration")
                     else:
-                        st.error("❌ LLM endpoint not properly configured")
+                        st.error("❌ Serving endpoint not configured")
                 
                 if st.button("Test Connection"):
                     with st.spinner("Testing connection..."):

@@ -60,8 +60,6 @@ PGAPPNAME=student-remediation-app
 
 # Databricks LLM Configuration
 SERVING_ENDPOINT=your_model_serving_endpoint_name
-DATABRICKS_HOST=your_databricks_workspace_url
-DATABRICKS_TOKEN=your_databricks_access_token
 
 # Optional: For local development
 PGUSER=your_username
@@ -128,9 +126,12 @@ The application now includes intelligent intervention recommendations powered by
 #### Configuration:
 ```env
 SERVING_ENDPOINT=your_model_endpoint_name
-DATABRICKS_HOST=your_workspace.cloud.databricks.com
-DATABRICKS_TOKEN=dapi-your-access-token
 ```
+
+#### Authentication:
+- Uses **on-behalf-of user authentication** via Databricks AI Bridge
+- No tokens required - leverages user's existing permissions
+- Secure and follows Databricks best practices
 
 ## 🚀 Databricks Deployment
 
@@ -183,8 +184,6 @@ databricks fs cp app.yaml dbfs:/FileStore/apps/student-remediation/
    PGSSLMODE=require
    PGAPPNAME=student-remediation-app
    SERVING_ENDPOINT=your_model_serving_endpoint
-   DATABRICKS_HOST=your_workspace.cloud.databricks.com
-   DATABRICKS_TOKEN=your_databricks_token
    ```
 
 ### Step 5: Deploy the Application
