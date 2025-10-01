@@ -103,6 +103,16 @@ def get_connection(dbname=None):
 def extract_useful_text_from_structured_response(content_list) -> Optional[str]:
     """Extract useful recommendation text from gpt-oss structured response"""
     try:
+        # First, try to find the final text component from the last element
+        # This handles the specific format: [{'type': 'reasoning', ...}, {'type': 'text', 'text': '...'}]
+        if content_list and len(content_list) > 0:
+            # Look for the last element with type 'text'
+            for item in reversed(content_list):
+                if isinstance(item, dict) and item.get('type') == 'text' and 'text' in item:
+                    logger.debug(f"Found final text component: {item['text'][:100]}...")
+                    return str(item['text'])
+        
+        # Fallback: extract text from any element (original logic)
         useful_parts = []
         
         for item in content_list:
@@ -164,7 +174,131 @@ def clean_reasoning_text(text: str) -> str:
     # Fallback: return a cleaned version of the original
     return text.replace('We need to produce structured recommendation.', '').strip()
 
-def call_databricks_serving_endpoint(prompt: str, max_tokens: int = 500) -> Optional[str]:
+def clean_ai_response(ai_text: str) -> str:
+    """Clean AI response to remove any prompt instructions or unwanted text"""
+    if not ai_text:
+        return ai_text
+    
+    # Remove common prompt instruction leakage
+    lines = ai_text.split('\n')
+    clean_lines = []
+    
+    skip_phrases = [
+        'likely academic meeting',
+        'provide priority levels',
+        'use numbered list',
+        'double line breaks',
+        'single line breaks',
+        'provide actionable steps',
+        'choose from these interventions',
+        'format each recommendation',
+        'copy exactly'
+    ]
+    
+    for line in lines:
+        line_lower = line.lower().strip()
+        
+        # Skip lines that contain prompt instructions
+        if any(phrase in line_lower for phrase in skip_phrases):
+            continue
+            
+        # Skip lines that are just formatting instructions
+        if line_lower.startswith(('important:', 'required format:', 'use double', 'use single')):
+            continue
+            
+        # Keep the actual content
+        clean_lines.append(line)
+    
+    return '\n'.join(clean_lines).strip()
+
+def format_ai_recommendations(ai_text: str) -> str:
+    """Format AI recommendations with proper line breaks and structure"""
+    if not ai_text:
+        return ai_text
+    
+    # Clean up the text first
+    formatted_text = ai_text.strip()
+    
+    # Ensure numbered items start on new lines
+    formatted_text = formatted_text.replace('1.', '\n\n1.')
+    formatted_text = formatted_text.replace('2.', '\n\n2.')
+    formatted_text = formatted_text.replace('3.', '\n\n3.')
+    
+    # Clean up multiple newlines
+    while '\n\n\n' in formatted_text:
+        formatted_text = formatted_text.replace('\n\n\n', '\n\n')
+    
+    # Remove leading newlines
+    formatted_text = formatted_text.lstrip('\n')
+    
+    return formatted_text
+
+def format_intervention_details_for_display(ai_details: str) -> str:
+    """Format AI-generated intervention details for better readability"""
+    if not ai_details:
+        return ai_details
+    
+    # Clean up the text for text area display
+    formatted_text = ai_details
+    
+    # Remove problematic formatting that causes display issues
+    formatted_text = formatted_text.replace('**', '')
+    formatted_text = formatted_text.replace('---', '')
+    
+    # Remove equals signs and hash symbols that create visual clutter
+    formatted_text = formatted_text.replace('='*50, '')
+    formatted_text = formatted_text.replace('='*40, '')
+    formatted_text = formatted_text.replace('='*30, '')
+    formatted_text = formatted_text.replace('='*20, '')
+    formatted_text = formatted_text.replace('='*10, '')
+    formatted_text = formatted_text.replace('#', '')
+    
+    # Clean up any table formatting completely
+    if '|' in formatted_text:
+        lines = formatted_text.split('\n')
+        clean_lines = []
+        
+        for line in lines:
+            # Skip any line with table formatting
+            if '|' in line or '---' in line:
+                # Try to extract meaningful content from table rows
+                if '|' in line and line.count('|') >= 2:
+                    parts = [part.strip() for part in line.split('|') if part.strip()]
+                    if len(parts) >= 2 and not any(header in parts[0] for header in ['#', 'Action', 'Who', 'Deadline']):
+                        clean_lines.append(f"• {parts[1] if len(parts) > 1 else parts[0]}")
+                continue
+            else:
+                clean_lines.append(line)
+        
+        formatted_text = '\n'.join(clean_lines)
+    
+    # Clean up lines that are just equals signs or dashes
+    lines = formatted_text.split('\n')
+    clean_lines = []
+    for line in lines:
+        stripped = line.strip()
+        # Skip lines that are just equals signs, dashes, or pipes
+        if not stripped or stripped.replace('=', '').replace('-', '').replace('|', '').strip() == '':
+            continue
+        clean_lines.append(line)
+    
+    formatted_text = '\n'.join(clean_lines)
+    
+    # Ensure proper spacing for numbered lists and bullet points
+    formatted_text = formatted_text.replace('\n•', '\n• ')  # Ensure space after bullet
+    formatted_text = formatted_text.replace('\n1.', '\n\n1.')  # Add space before numbered items
+    formatted_text = formatted_text.replace('\n2.', '\n\n2.')
+    formatted_text = formatted_text.replace('\n3.', '\n\n3.')
+    formatted_text = formatted_text.replace('\n4.', '\n\n4.')
+    formatted_text = formatted_text.replace('\n5.', '\n\n5.')
+    
+    # Clean up excessive newlines
+    while '\n\n\n' in formatted_text:
+        formatted_text = formatted_text.replace('\n\n\n', '\n\n')
+    
+    return formatted_text.strip()
+
+def call_databricks_serving_endpoint(prompt: str, max_tokens: int = 500, response_format: Optional[Dict] = None) -> Optional[str]:
     """Call Databricks model serving endpoint using OpenAI-compatible client"""
     if not SERVING_ENDPOINT:
         logger.warning("Serving endpoint not configured")
@@ -176,12 +310,19 @@ def call_databricks_serving_endpoint(prompt: str, max_tokens: int = 500) -> Opti
         w = WorkspaceClient()
         client = w.serving_endpoints.get_open_ai_client()  # OpenAI-compatible
         
-        r = client.chat.completions.create(
-            model=SERVING_ENDPOINT,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=max_tokens,
-            temperature=0.7
-        )
+        # Prepare the request parameters
+        request_params = {
+            "model": SERVING_ENDPOINT,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+            "temperature": 0.7
+        }
+        
+        # Add response_format if provided (for structured outputs)
+        if response_format:
+            request_params["response_format"] = response_format
+        
+        r = client.chat.completions.create(**request_params)
         
         logger.debug(f"Response received successfully")
         
@@ -233,112 +374,125 @@ def call_databricks_serving_endpoint(prompt: str, max_tokens: int = 500) -> Opti
 
 
 def generate_intervention_recommendations(student_data: Dict) -> Dict[str, any]:
-    """Generate intelligent intervention recommendations using LLM"""
+    """Generate intelligent intervention recommendations using LLM with structured output"""
     
-    # Create a direct, actionable prompt
+    # Define the JSON schema for structured output
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "intervention_recommendations",
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "recommendations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "intervention_type": {
+                                    "type": "string",
+                                    "enum": ["Academic Meeting", "Study Plan Assignment", "Tutoring Referral", 
+                                           "Counseling Referral", "Financial Aid Consultation", "Career Guidance Session", 
+                                           "Peer Mentoring Program", "Academic Probation Review"]
+                                },
+                                "priority": {
+                                    "type": "string",
+                                    "enum": ["High", "Medium", "Low"]
+                                },
+                                "action": {
+                                    "type": "string",
+                                    "description": "Brief specific action explaining why this student needs this intervention"
+                                },
+                                "timeline": {
+                                    "type": "string",
+                                    "description": "When to implement this intervention"
+                                },
+                                "goal": {
+                                    "type": "string",
+                                    "description": "Measurable outcome specific to this student"
+                                }
+                            },
+                            "required": ["intervention_type", "priority", "action", "timeline", "goal"],
+                            "additionalProperties": False
+                        },
+                        "minItems": 3,
+                        "maxItems": 3
+                    }
+                },
+                "required": ["recommendations"],
+                "additionalProperties": False
+            },
+            "strict": True
+        }
+    }
+    
+    # Create a structured prompt
     prompt = f"""
-Provide 3 specific intervention recommendations for this student. Be direct and actionable.
+Provide 3 concise intervention recommendations for this student. Each recommendation should directly address their specific situation.
 
-Student: {student_data.get('full_name', 'Student')} - {student_data.get('major', 'N/A')} - {student_data.get('year_level', 'N/A')}
-GPA: {student_data.get('gpa', 'N/A')} | Failing: {student_data.get('failing_grades', 0)}/{student_data.get('courses_enrolled', 0)} courses
-Risk Level: {student_data.get('risk_category', 'N/A')}
+Student: {student_data.get('full_name', 'Student')} ({student_data.get('major', 'N/A')}, {student_data.get('year_level', 'N/A')})
+GPA: {student_data.get('gpa', 'N/A')} | Failing: {student_data.get('failing_grades', 0)}/{student_data.get('courses_enrolled', 0)} courses | Risk: {student_data.get('risk_category', 'N/A')}
 
-Choose from these interventions: Academic Meeting, Study Plan Assignment, Tutoring Referral, Counseling Referral, Financial Aid Consultation, Career Guidance Session, Peer Mentoring Program, Academic Probation Review
+For each recommendation:
+- Choose intervention_type from: Academic Meeting, Study Plan Assignment, Tutoring Referral, Counseling Referral, Financial Aid Consultation, Career Guidance Session, Peer Mentoring Program, Academic Probation Review
+- Set priority: High, Medium, or Low
+- Write brief action explaining why this specific student needs this intervention
+- Specify timeline for implementation
+- Define measurable goal specific to this student's situation
 
-Format:
-1. [Intervention Type] - [Priority: High/Medium/Low]
-   Action: [Specific action to take]
-   Timeline: [When to implement]
-   Goal: [Success metric]
-
-2. [Intervention Type] - [Priority: High/Medium/Low]
-   Action: [Specific action to take]
-   Timeline: [When to implement]
-   Goal: [Success metric]
-
-3. [Intervention Type] - [Priority: High/Medium/Low]
-   Action: [Specific action to take]
-   Timeline: [When to implement]
-   Goal: [Success metric]
+Respond with a JSON object containing an array of 3 recommendations.
 """
 
-    # Call the LLM
-    llm_response = call_databricks_serving_endpoint(prompt, max_tokens=800)
+    # Call the LLM with structured output
+    llm_response = call_databricks_serving_endpoint(prompt, max_tokens=800, response_format=response_format)
     
     if not llm_response:
-        # Fallback to rule-based recommendations if LLM fails
-        return generate_fallback_recommendations(student_data)
+        # Return empty result if LLM fails
+        return {
+            "llm_recommendations": "AI recommendations are currently unavailable. Please try again later.",
+            "structured_recommendations": [],
+            "student_context": student_data,
+            "generated_at": pd.Timestamp.now().isoformat(),
+            "source": "llm_unavailable"
+        }
     
-    return {
-        "llm_recommendations": llm_response,
-        "student_context": student_data,
-        "generated_at": pd.Timestamp.now().isoformat(),
-        "source": "databricks_llm"
-    }
+    try:
+        # Parse the structured JSON response
+        import json
+        structured_data = json.loads(llm_response)
+        recommendations = structured_data.get("recommendations", [])
+        
+        # Format the structured data for display
+        formatted_text = ""
+        for i, rec in enumerate(recommendations, 1):
+            formatted_text += f"{i}. {rec['intervention_type']} - Priority: {rec['priority']}\n\n"
+            formatted_text += f"Action: {rec['action']}\n\n"
+            formatted_text += f"Timeline: {rec['timeline']}\n\n"
+            formatted_text += f"Goal: {rec['goal']}\n\n"
+            if i < len(recommendations):
+                formatted_text += "\n"
+        
+        return {
+            "llm_recommendations": formatted_text.strip(),
+            "structured_recommendations": recommendations,
+            "student_context": student_data,
+            "generated_at": pd.Timestamp.now().isoformat(),
+            "source": "databricks_llm_structured"
+        }
+        
+    except (json.JSONDecodeError, KeyError) as e:
+        logger.warning(f"Failed to parse structured response: {e}")
+        # Fallback to original text processing
+        cleaned_response = clean_ai_response(llm_response)
+        
+        return {
+            "llm_recommendations": cleaned_response,
+            "structured_recommendations": [],
+            "student_context": student_data,
+            "generated_at": pd.Timestamp.now().isoformat(),
+            "source": "databricks_llm_fallback"
+        }
 
-def generate_fallback_recommendations(student_data: Dict) -> Dict[str, any]:
-    """Generate rule-based recommendations as fallback when LLM is unavailable"""
-    
-    risk_category = student_data.get('risk_category', '')
-    gpa = float(student_data.get('gpa', 0))
-    failing_grades = int(student_data.get('failing_grades', 0))
-    
-    recommendations = []
-    
-    if risk_category == 'High Risk':
-        recommendations = [
-            {
-                "type": "Academic Meeting",
-                "priority": "High",
-                "details": "Immediate one-on-one meeting to assess challenges and create action plan",
-                "timeline": "Within 48 hours"
-            },
-            {
-                "type": "Tutoring Referral", 
-                "priority": "High",
-                "details": "Connect with subject-specific tutoring for failing courses",
-                "timeline": "Within 1 week"
-            },
-            {
-                "type": "Counseling Referral",
-                "priority": "Medium",
-                "details": "Assess for personal/emotional factors affecting academic performance",
-                "timeline": "Within 2 weeks"
-            }
-        ]
-    elif risk_category == 'Medium Risk':
-        recommendations = [
-            {
-                "type": "Study Plan Assignment",
-                "priority": "Medium", 
-                "details": "Develop structured study schedule and time management strategies",
-                "timeline": "Within 1 week"
-            },
-            {
-                "type": "Academic Meeting",
-                "priority": "Medium",
-                "details": "Check-in meeting to monitor progress and adjust support",
-                "timeline": "Within 1 week"
-            }
-        ]
-    else:
-        recommendations = [
-            {
-                "type": "Academic Meeting",
-                "priority": "Low",
-                "details": "Regular check-in to maintain positive trajectory",
-                "timeline": "Within 2 weeks"
-            }
-        ]
-    
-    return {
-        "llm_recommendations": f"Rule-based recommendations for {student_data.get('full_name', 'student')}:\n\n" + 
-                             "\n".join([f"• {rec['type']} ({rec['priority']} Priority): {rec['details']}" for rec in recommendations]),
-        "structured_recommendations": recommendations,
-        "student_context": student_data,
-        "generated_at": pd.Timestamp.now().isoformat(),
-        "source": "rule_based_fallback"
-    }
 
 def generate_personalized_intervention_details(intervention_type: str, student_data: Dict, priority: str) -> str:
     """Generate personalized intervention details using LLM"""
@@ -350,46 +504,175 @@ Student: {student_data.get('full_name', 'N/A')} ({student_data.get('major', 'N/A
 GPA: {student_data.get('gpa', 'N/A')} | Risk: {student_data.get('risk_category', 'N/A')}
 Intervention: {intervention_type} (Priority: {priority})
 
-Provide:
-• Objective: [What to achieve]
-• Action Steps: [Specific steps to take]
-• Timeline: [When to complete each step]
-• Resources: [What's needed]
-• Success Measure: [How to track progress]
+CRITICAL: Output ONLY clean numbered lists. NO tables, NO pipes (|), NO equals signs (=), NO markdown headers (#).
 
-Keep it concise and actionable for academic advisors.
+Use this EXACT format:
+
+1. Objective
+Develop and implement [specific goal with measurable outcome]
+
+2. Action Steps
+• Complete [specific action 1]
+• Schedule [specific action 2] 
+• Implement [specific action 3]
+• Follow up [specific action 4]
+
+3. Timeline
+• Week 1: [action]
+• Week 2: [action]
+• Ongoing: [action]
+
+4. Resources Needed
+• [Resource 1]
+• [Resource 2]
+• [Resource 3]
+
+5. Success Measures
+• [Measurable outcome 1]
+• [Measurable outcome 2]
+
+Keep it concise and actionable. Use simple bullet points only.
 """
 
     llm_response = call_databricks_serving_endpoint(prompt, max_tokens=600)
     
     if llm_response:
-        return f"Priority: {priority}\n\nAI-Generated Intervention Plan:\n{llm_response}"
+        return f"Priority: {priority}\n\n{llm_response}"
     else:
-        # Fallback to basic template
-        return f"Priority: {priority}\n\nIntervention Type: {intervention_type}\nStudent: {student_data.get('full_name', 'N/A')}\nRecommended for {student_data.get('risk_category', 'N/A')} student in {student_data.get('major', 'N/A')}"
+        return f"Priority: {priority}\n\nAI intervention details are currently unavailable. Please provide manual details for this {intervention_type}."
 
-def get_rule_based_recommendations_text(student_data: Dict) -> str:
-    """Generate formatted rule-based recommendations text for copying to additional details"""
-    fallback_recommendations = generate_fallback_recommendations(student_data)
+def parse_ai_recommendations(recommendations_data: Dict) -> Dict:
+    """Parse AI recommendations data and extract structured data for form population"""
+    try:
+        # Check if we have structured recommendations from the new format
+        if 'structured_recommendations' in recommendations_data and recommendations_data['structured_recommendations']:
+            structured_recs = recommendations_data['structured_recommendations']
+            
+            # Convert structured format to our expected format
+            recommendations = []
+            for rec in structured_recs:
+                recommendations.append({
+                    'intervention_type': rec.get('intervention_type', ''),
+                    'priority': rec.get('priority', ''),
+                    'action': rec.get('action', ''),
+                    'timeline': rec.get('timeline', ''),
+                    'goal': rec.get('goal', '')
+                })
+            
+            return {
+                'recommendations': recommendations,
+                'primary_recommendation': recommendations[0] if recommendations else None
+            }
+        
+        # Fallback: parse from text format (legacy support)
+        ai_text = recommendations_data.get('llm_recommendations', '')
+        recommendations = []
+        lines = ai_text.split('\n')
+        current_rec = {}
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+                
+            # Look for numbered recommendations (1., 2., 3.)
+            if line.startswith(('1.', '2.', '3.')):
+                # Save previous recommendation if exists
+                if current_rec:
+                    recommendations.append(current_rec)
+                
+                # Parse intervention type and priority
+                current_rec = {}
+                if ' - Priority:' in line or ' - [Priority:' in line:
+                    parts = line.split(' - ')
+                    if len(parts) >= 2:
+                        # Extract intervention type (remove number)
+                        intervention_part = parts[0].split('.', 1)[1].strip()
+                        current_rec['intervention_type'] = intervention_part.strip('[]')
+                        
+                        # Extract priority
+                        priority_part = parts[1].replace('Priority:', '').replace('[Priority:', '').strip('[]')
+                        current_rec['priority'] = priority_part.split(']')[0].strip()
+            
+            # Look for action items
+            elif line.startswith('Action:'):
+                current_rec['action'] = line.replace('Action:', '').strip()
+            
+            # Look for timeline
+            elif line.startswith('Timeline:'):
+                current_rec['timeline'] = line.replace('Timeline:', '').strip()
+                
+            # Look for goals/objectives
+            elif line.startswith(('Goal:', 'Objective:')):
+                current_rec['goal'] = line.replace('Goal:', '').replace('Objective:', '').strip()
+        
+        # Add the last recommendation
+        if current_rec:
+            recommendations.append(current_rec)
+        
+        return {
+            'recommendations': recommendations,
+            'primary_recommendation': recommendations[0] if recommendations else None
+        }
+        
+    except Exception as e:
+        logger.debug(f"Error parsing AI recommendations: {e}")
+        return {'recommendations': [], 'primary_recommendation': None}
+
+def generate_meeting_details_from_ai(recommendation: Dict, student_data: Dict) -> Dict:
+    """Generate meeting details based on AI recommendation and student context"""
+    import datetime
     
-    if 'structured_recommendations' in fallback_recommendations:
-        recommendations = fallback_recommendations['structured_recommendations']
-        
-        text = f"Rule-Based Recommendations for {student_data.get('full_name', 'Student')}:\n\n"
-        
-        for i, rec in enumerate(recommendations, 1):
-            text += f"{i}. {rec['type']} ({rec['priority']} Priority)\n"
-            text += f"   Details: {rec['details']}\n"
-            text += f"   Timeline: {rec['timeline']}\n\n"
-        
-        text += f"Generated based on:\n"
-        text += f"- Risk Category: {student_data.get('risk_category', 'N/A')}\n"
-        text += f"- GPA: {student_data.get('gpa', 'N/A')}\n"
-        text += f"- Failing Grades: {student_data.get('failing_grades', 0)}/{student_data.get('courses_enrolled', 0)}\n"
-        
-        return text
+    details = {}
+    
+    # Determine meeting type based on intervention and priority
+    if recommendation.get('priority', '').lower() == 'high':
+        details['meeting_type'] = 'In-Person'
+        # Schedule within 48 hours for high priority
+        details['meeting_date'] = datetime.date.today() + datetime.timedelta(days=1)
+        details['meeting_time'] = datetime.time(10, 0)  # 10:00 AM
+    elif recommendation.get('priority', '').lower() == 'medium':
+        details['meeting_type'] = 'Virtual'
+        # Schedule within 1 week for medium priority
+        details['meeting_date'] = datetime.date.today() + datetime.timedelta(days=3)
+        details['meeting_time'] = datetime.time(14, 0)  # 2:00 PM
     else:
-        return fallback_recommendations.get('llm_recommendations', 'No recommendations available')
+        details['meeting_type'] = 'Virtual'
+        # Schedule within 2 weeks for low priority
+        details['meeting_date'] = datetime.date.today() + datetime.timedelta(days=7)
+        details['meeting_time'] = datetime.time(15, 0)  # 3:00 PM
+    
+    # Generate agenda based on AI recommendation and student context
+    agenda_items = []
+    
+    # Add student context to agenda
+    risk_level = student_data.get('risk_category', 'Unknown')
+    gpa = student_data.get('gpa', 'N/A')
+    failing_courses = student_data.get('failing_grades', 0)
+    
+    agenda_items.append(f"Review academic standing: {risk_level} risk level, GPA: {gpa}")
+    
+    if failing_courses > 0:
+        agenda_items.append(f"Address {failing_courses} failing course(s)")
+    
+    # Add AI recommendation action items
+    if recommendation.get('action'):
+        agenda_items.append(f"Action plan: {recommendation['action']}")
+    
+    if recommendation.get('goal'):
+        agenda_items.append(f"Success goals: {recommendation['goal']}")
+    
+    if recommendation.get('timeline'):
+        agenda_items.append(f"Timeline: {recommendation['timeline']}")
+    
+    # Add follow-up items
+    agenda_items.append("Establish regular check-in schedule")
+    agenda_items.append("Identify additional support resources needed")
+    
+    details['agenda'] = '\n'.join([f"• {item}" for item in agenda_items])
+    
+    return details
+
 
 
 # Student Risk Management Functions
@@ -557,17 +840,38 @@ def main():
     if 'page' not in st.session_state:
         st.session_state.page = "Student Risk Dashboard"
     
-    # Page selection with session state
-    page = st.sidebar.selectbox(
-        "Choose a page", 
-        ["Student Risk Dashboard", "Create Intervention", "Scheduled Remediations"],
-        index=0 if st.session_state.page == "Student Risk Dashboard" else (1 if st.session_state.page == "Create Intervention" else 2),
-        key="page_selector"
-    )
+    # Page navigation menu
+    st.sidebar.markdown("## 📋 Navigation")
+    st.sidebar.markdown("---")
     
-    # Update session state when page changes
-    if page != st.session_state.page:
-        st.session_state.page = page
+    # Define pages with icons
+    pages = [
+        {"name": "Student Risk Dashboard", "icon": "📊"},
+        {"name": "Create Intervention", "icon": "📝"},
+        {"name": "Scheduled Remediations", "icon": "📅"}
+    ]
+    
+    # Create menu buttons
+    for page_info in pages:
+        page_name = page_info["name"]
+        icon = page_info["icon"]
+        
+        # Check if this is the current page
+        is_current = st.session_state.page == page_name
+        
+        # Create button with different styling for current page
+        if is_current:
+            # Current page - use primary button style
+            if st.sidebar.button(f"{icon} {page_name}", key=f"nav_{page_name}", use_container_width=True, type="primary"):
+                pass  # Already on this page
+        else:
+            # Other pages - use secondary button style
+            if st.sidebar.button(f"{icon} {page_name}", key=f"nav_{page_name}", use_container_width=True):
+                st.session_state.page = page_name
+                st.rerun()
+    
+    # Get current page for the main content
+    page = st.session_state.page
     
     if page == "Student Risk Dashboard":
         show_student_dashboard()
@@ -734,7 +1038,7 @@ def show_student_dashboard():
         # Display students in a more visual way
         for idx, student in filtered_df.iterrows():
             with st.container():
-                col1, col2, col3, col4 = st.columns([3, 2, 2, 1])
+                col1, col2, col3, col4 = st.columns([3, 1.5, 1.5, 2])
                 
                 with col1:
                     risk_color = get_risk_color(student['risk_category'])
@@ -754,28 +1058,25 @@ def show_student_dashboard():
                     st.write(f"**Failing:** {student['failing_grades']}/{student['courses_enrolled']}")
                 
                 with col4:
-                    col4a, col4b = st.columns(2)
-                    
-                    with col4a:
-                        if st.button(f"🤖 AI Rec", key=f"ai_btn_{student['student_id']}", help="Get AI-powered intervention recommendations"):
-                            with st.spinner("Generating AI recommendations..."):
-                                student_dict = student.to_dict()
-                                recommendations = generate_intervention_recommendations(student_dict)
-                                
-                                # Store recommendations in session state
-                                st.session_state[f"recommendations_{student['student_id']}"] = recommendations
-                                st.rerun()
-                    
-                    with col4b:
-                        if st.button(f"Create", key=f"btn_{student['student_id']}", help="Create intervention manually"):
-                            st.session_state.selected_student = student['student_id']
-                            st.session_state.selected_student_name = student['full_name']
-                            st.session_state.selected_student_major = student['major']
-                            st.session_state.selected_student_year = student['year_level']
-                            st.session_state.selected_student_gpa = student['gpa']
-                            st.session_state.selected_student_risk = student['risk_category']
-                            st.session_state.page = "Create Intervention"
+                    # Stack buttons vertically for better text readability
+                    if st.button(f"🤖 AI Rec", key=f"ai_btn_{student['student_id']}", help="Get AI-powered intervention recommendations", use_container_width=True):
+                        with st.spinner("Generating AI recommendations..."):
+                            student_dict = student.to_dict()
+                            recommendations = generate_intervention_recommendations(student_dict)
+                            
+                            # Store recommendations in session state
+                            st.session_state[f"recommendations_{student['student_id']}"] = recommendations
                             st.rerun()
+                    
+                    if st.button(f"Create", key=f"btn_{student['student_id']}", help="Create intervention manually", use_container_width=True):
+                        st.session_state.selected_student = student['student_id']
+                        st.session_state.selected_student_name = student['full_name']
+                        st.session_state.selected_student_major = student['major']
+                        st.session_state.selected_student_year = student['year_level']
+                        st.session_state.selected_student_gpa = student['gpa']
+                        st.session_state.selected_student_risk = student['risk_category']
+                        st.session_state.page = "Create Intervention"
+                        st.rerun()
                 
                 # Display AI recommendations if available
                 if f"recommendations_{student['student_id']}" in st.session_state:
@@ -784,8 +1085,10 @@ def show_student_dashboard():
                     with st.expander(f"🤖 AI Recommendations for {student['full_name']}", expanded=True):
                         st.markdown("### AI-Generated Intervention Recommendations")
                         
-                        # Display the LLM response
-                        st.markdown(recommendations["llm_recommendations"])
+                        # Display the LLM response with proper formatting and cleaning
+                        cleaned_recommendations = clean_ai_response(recommendations["llm_recommendations"])
+                        formatted_recommendations = format_ai_recommendations(cleaned_recommendations)
+                        st.markdown(formatted_recommendations)
                         
                         # Add metadata
                         col_meta1, col_meta2 = st.columns(2)
@@ -800,14 +1103,49 @@ def show_student_dashboard():
                         
                         with col_action1:
                             if st.button("📝 Create from AI Rec", key=f"create_ai_{student['student_id']}"):
-                                # Pre-populate intervention form with AI recommendations
+                                # Parse AI recommendations and auto-populate form
+                                parsed_ai = parse_ai_recommendations(recommendations)
+                                
+                                # Store student data
                                 st.session_state.selected_student = student['student_id']
                                 st.session_state.selected_student_name = student['full_name']
                                 st.session_state.selected_student_major = student['major']
                                 st.session_state.selected_student_year = student['year_level']
                                 st.session_state.selected_student_gpa = student['gpa']
                                 st.session_state.selected_student_risk = student['risk_category']
+                                
+                                # Store AI recommendations and parsed data
                                 st.session_state.ai_recommendations = recommendations
+                                st.session_state.parsed_ai_recommendations = parsed_ai
+                                
+                                # Auto-populate form fields from primary recommendation
+                                if parsed_ai.get('primary_recommendation'):
+                                    primary_rec = parsed_ai['primary_recommendation']
+                                    
+                                    # Set intervention type and priority
+                                    if primary_rec.get('intervention_type'):
+                                        st.session_state.ai_selected_intervention_type = primary_rec['intervention_type']
+                                    if primary_rec.get('priority'):
+                                        st.session_state.ai_selected_priority = primary_rec['priority']
+                                    
+                                    # Generate meeting details if it's an Academic Meeting
+                                    if primary_rec.get('intervention_type') == 'Academic Meeting':
+                                        student_dict = student.to_dict()
+                                        meeting_details = generate_meeting_details_from_ai(primary_rec, student_dict)
+                                        st.session_state.ai_meeting_details = meeting_details
+                                    
+                                    # Store AI-generated details for form population
+                                    ai_details_text = f"AI Recommendation: {primary_rec.get('intervention_type', 'N/A')}\n"
+                                    ai_details_text += f"Priority: {primary_rec.get('priority', 'N/A')}\n"
+                                    if primary_rec.get('action'):
+                                        ai_details_text += f"Action: {primary_rec['action']}\n"
+                                    if primary_rec.get('timeline'):
+                                        ai_details_text += f"Timeline: {primary_rec['timeline']}\n"
+                                    if primary_rec.get('goal'):
+                                        ai_details_text += f"Goal: {primary_rec['goal']}\n"
+                                    
+                                    st.session_state.ai_generated_details = ai_details_text
+                                
                                 st.session_state.page = "Create Intervention"
                                 st.rerun()
                         
@@ -837,7 +1175,9 @@ def show_create_intervention():
         st.success("🤖 AI recommendations available! Use the suggestions below or create a custom intervention.")
         
         with st.expander("🤖 View AI Recommendations", expanded=True):
-            st.markdown(ai_recommendations["llm_recommendations"])
+            cleaned_recommendations = clean_ai_response(ai_recommendations["llm_recommendations"])
+            formatted_recommendations = format_ai_recommendations(cleaned_recommendations)
+            st.markdown(formatted_recommendations)
             
             if st.button("🗑️ Clear AI Recommendations"):
                 # Clear all AI-related session state
@@ -872,7 +1212,8 @@ def show_create_intervention():
         if st.button("🔄 Clear Selection & Start Fresh"):
             for key in ['selected_student', 'selected_student_name', 'selected_student_major', 
                        'selected_student_year', 'selected_student_gpa', 'selected_student_risk',
-                       'ai_recommendations', 'ai_generated_details', 'ai_selected_intervention_type', 'ai_selected_priority']:
+                       'ai_recommendations', 'ai_generated_details', 'ai_selected_intervention_type', 
+                       'ai_selected_priority', 'parsed_ai_recommendations', 'ai_meeting_details']:
                 if key in st.session_state:
                     del st.session_state[key]
             st.rerun()
@@ -942,15 +1283,6 @@ def show_create_intervention():
                             del st.session_state[key]
                     st.rerun()
         
-        # Display AI-generated details if available
-        if 'ai_generated_details' in st.session_state:
-            with st.expander("🤖 Generated AI Details Preview", expanded=True):
-                st.text_area("AI-Generated Details (will be used in form below)", 
-                           value=st.session_state['ai_generated_details'], 
-                           height=150, 
-                           disabled=True,
-                           key="ai_details_preview")
-                st.info("💡 These details will be automatically filled in the intervention details field below.")
         
         st.markdown("---")
         
@@ -1010,13 +1342,35 @@ def show_create_intervention():
             st.info("🤖 AI-generated details are pre-filled below. You can edit them as needed.")
         
         if intervention_type == "Academic Meeting":
-            meeting_type = st.selectbox("Meeting Type", ["In-Person", "Virtual", "Phone"])
-            meeting_date = st.date_input("Proposed Meeting Date")
-            meeting_time = st.time_input("Proposed Meeting Time")
+            # Use AI-generated meeting details if available
+            ai_meeting_details = st.session_state.get('ai_meeting_details', {})
+            
+            # Pre-select meeting type from AI recommendation
+            meeting_type_options = ["In-Person", "Virtual", "Phone"]
+            default_meeting_type_index = 0
+            if ai_meeting_details.get('meeting_type') in meeting_type_options:
+                default_meeting_type_index = meeting_type_options.index(ai_meeting_details['meeting_type'])
+            
+            meeting_type = st.selectbox("Meeting Type", meeting_type_options, index=default_meeting_type_index)
+            
+            # Pre-populate date and time from AI recommendation
+            default_date = ai_meeting_details.get('meeting_date', None)
+            default_time = ai_meeting_details.get('meeting_time', None)
+            
+            meeting_date = st.date_input("Proposed Meeting Date", value=default_date)
+            meeting_time = st.time_input("Proposed Meeting Time", value=default_time)
+            
+            # Use AI-generated agenda if available, otherwise use general AI details
+            agenda_text = ai_meeting_details.get('agenda', ai_details)
+            
+            # Format the agenda text for better display
+            formatted_agenda = format_intervention_details_for_display(agenda_text)
+            
             
             agenda = st.text_area("Meeting Agenda", 
-                                value=ai_details,
-                                placeholder="Discuss academic performance, identify challenges, create action plan...")
+                                value=formatted_agenda,
+                                placeholder="Discuss academic performance, identify challenges, create action plan...",
+                                height=200)
             details = f"Meeting Type: {meeting_type}, Date: {meeting_date}, Time: {meeting_time}, Agenda: {agenda}"
             
         elif intervention_type == "Study Plan Assignment":
@@ -1024,7 +1378,7 @@ def show_create_intervention():
             focus_areas = st.multiselect("Focus Areas", ["Time Management", "Note Taking", "Test Preparation", "Research Skills", "Writing Skills"])
                 
             goals = st.text_area("Specific Goals", 
-                               value=ai_details,
+                               value=format_intervention_details_for_display(ai_details),
                                placeholder="Improve GPA to 2.5, complete all assignments on time...")
             details = f"Duration: {study_duration}, Focus Areas: {', '.join(focus_areas)}, Goals: {goals}"
             
@@ -1034,7 +1388,7 @@ def show_create_intervention():
             frequency = st.selectbox("Frequency", ["Once a week", "Twice a week", "Three times a week"])
                 
             tutor_notes = st.text_area("Additional Tutoring Details", 
-                                     value=ai_details,
+                                     value=format_intervention_details_for_display(ai_details),
                                      placeholder="Specific tutoring requirements, learning objectives...")
             details = f"Subjects: {subjects}, Type: {tutoring_type}, Frequency: {frequency}, Additional Details: {tutor_notes}"
             
@@ -1043,52 +1397,20 @@ def show_create_intervention():
             urgency = st.selectbox("Urgency", ["Immediate", "Within a week", "Within a month"])
                 
             reason = st.text_area("Reason for Referral", 
-                                value=ai_details,
+                                value=format_intervention_details_for_display(ai_details),
                                 placeholder="Describe the specific concerns and referral reasons...")
             details = f"Type: {counseling_type}, Urgency: {urgency}, Reason: {reason}"
             
         else:
             # For other intervention types, use the full AI details
             details = st.text_area("Intervention Details", 
-                                 value=ai_details,
+                                 value=format_intervention_details_for_display(ai_details),
                                  placeholder="Provide specific details about the intervention...")
         
-        # Additional notes section with rule-based recommendations
-        col_notes1, col_notes2 = st.columns([1, 1])
-        
-        with col_notes1:
-            additional_notes = st.text_area("Additional Notes", 
-                                           placeholder="Any additional information or special considerations...",
-                                           height=200)
-        
-        with col_notes2:
-            if 'selected_student' in st.session_state:
-                st.markdown("**📋 Rule-Based Recommendations**")
-                
-                # Generate rule-based recommendations for the selected student
-                student_data = {
-                    'student_id': st.session_state.selected_student,
-                    'full_name': st.session_state.get('selected_student_name', ''),
-                    'major': st.session_state.get('selected_student_major', ''),
-                    'year_level': st.session_state.get('selected_student_year', ''),
-                    'gpa': st.session_state.get('selected_student_gpa', 0.0),
-                    'risk_category': st.session_state.get('selected_student_risk', ''),
-                    'courses_enrolled': 5,  # Default values - could be enhanced
-                    'failing_grades': 1 if st.session_state.get('selected_student_risk') == 'High Risk' else 0
-                }
-                
-                rule_based_text = get_rule_based_recommendations_text(student_data)
-                
-                # Display rule-based recommendations in a text area (read-only)
-                st.text_area("Generated for reference (you can copy text from here)",
-                           value=rule_based_text,
-                           height=200,
-                           disabled=True,
-                           key="rule_based_display")
-                
-                st.caption("💡 Copy any relevant recommendations to Additional Notes on the left")
-            else:
-                st.info("Select a student to see rule-based recommendations")
+        # Additional notes section
+        additional_notes = st.text_area("Additional Notes", 
+                                       placeholder="Any additional information or special considerations...",
+                                       height=200)
         
         # Combine all details
         full_details = f"Priority: {priority}\nDetails: {details}\nAdditional Notes: {additional_notes}"
@@ -1105,7 +1427,8 @@ def show_create_intervention():
                     # Clear session state
                     for key in ['selected_student', 'selected_student_name', 'selected_student_major', 
                                'selected_student_year', 'selected_student_gpa', 'selected_student_risk',
-                               'ai_recommendations', 'ai_generated_details', 'ai_selected_intervention_type', 'ai_selected_priority']:
+                               'ai_recommendations', 'ai_generated_details', 'ai_selected_intervention_type', 
+                               'ai_selected_priority', 'parsed_ai_recommendations', 'ai_meeting_details']:
                         if key in st.session_state:
                             del st.session_state[key]
                         
@@ -1180,7 +1503,7 @@ def show_scheduled_remediations():
             priority_color = get_priority_color(priority)
             
             with st.container():
-                col1, col2, col3, col4 = st.columns([3, 2, 2, 1])
+                col1, col2, col3, col4 = st.columns([2.5, 1.5, 1.5, 2.5])
                 
                 with col1:
                     st.markdown(f"""
@@ -1199,11 +1522,11 @@ def show_scheduled_remediations():
                     st.write(f"**Created By:** {remediation['created_by']}")
                 
                 with col4:
-                    if st.button("View Details", key=f"view_{idx}"):
+                    if st.button("View Details", key=f"view_{idx}", use_container_width=True):
                         with st.expander("Intervention Details", expanded=True):
                             st.text_area("Full Details", value=remediation['intervention_details'], height=200, disabled=True)
                     
-                    if st.button("Mark Complete", key=f"complete_{idx}"):
+                    if st.button("Mark Complete", key=f"complete_{idx}", use_container_width=True):
                         # Update status to completed
                         try:
                             with get_connection(DATABASE_REMEDIATION_DATA) as conn:
