@@ -5,7 +5,6 @@ import os
 # import time
 from databricks import sdk
 from databricks.sdk import WorkspaceClient
-from databricks_ai_bridge import ModelServingUserCredentials
 import plotly.express as px
 from dotenv import load_dotenv
 import logging
@@ -101,81 +100,166 @@ def get_connection(dbname=None):
 
 # LLM-Powered Intervention Recommendation Functions
 
+def extract_useful_text_from_structured_response(content_list) -> Optional[str]:
+    """Extract useful recommendation text from gpt-oss structured response"""
+    try:
+        useful_parts = []
+        
+        for item in content_list:
+            if isinstance(item, dict):
+                # Look for summary text in the structure
+                if 'summary' in item and isinstance(item['summary'], list):
+                    for summary_item in item['summary']:
+                        if isinstance(summary_item, dict) and 'text' in summary_item:
+                            text = summary_item['text']
+                            # Clean up the reasoning text and extract actionable parts
+                            cleaned_text = clean_reasoning_text(text)
+                            if cleaned_text:
+                                useful_parts.append(cleaned_text)
+                
+                # Look for direct text content
+                elif 'text' in item:
+                    useful_parts.append(str(item['text']))
+                
+                # Look for other useful fields
+                elif 'content' in item:
+                    useful_parts.append(str(item['content']))
+        
+        if useful_parts:
+            return " ".join(useful_parts)
+        
+        return None
+        
+    except Exception as e:
+        logger.debug(f"Error extracting structured response: {e}")
+        return None
+
+def clean_reasoning_text(text: str) -> str:
+    """Clean up reasoning text to extract actionable recommendations"""
+    if not text:
+        return ""
+    
+    # Split into sentences and look for actionable content
+    sentences = text.split('. ')
+    useful_sentences = []
+    
+    # Keywords that indicate actionable content
+    action_keywords = [
+        'recommend', 'suggest', 'should', 'need', 'priority', 'timeline', 
+        'action', 'meeting', 'tutoring', 'counseling', 'academic', 'intervention'
+    ]
+    
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if any(keyword in sentence.lower() for keyword in action_keywords):
+            # Skip meta-reasoning sentences
+            if not any(meta in sentence.lower() for meta in [
+                'we need to', 'let\'s', 'probably', 'perhaps', 'but we need to choose'
+            ]):
+                useful_sentences.append(sentence)
+    
+    if useful_sentences:
+        return '. '.join(useful_sentences) + '.'
+    
+    # Fallback: return a cleaned version of the original
+    return text.replace('We need to produce structured recommendation.', '').strip()
+
 def call_databricks_serving_endpoint(prompt: str, max_tokens: int = 500) -> Optional[str]:
-    """Call Databricks model serving endpoint using on-behalf-of user authentication"""
+    """Call Databricks model serving endpoint using OpenAI-compatible client"""
     if not SERVING_ENDPOINT:
         logger.warning("Serving endpoint not configured")
         return None
     
     try:
-        # Configure Databricks SDK WorkspaceClient with on-behalf-of user authentication
-        user_client = WorkspaceClient(credentials_strategy=ModelServingUserCredentials())
+        logger.debug(f"Calling gpt-oss endpoint: {SERVING_ENDPOINT}")
         
-        # gpt-oss models use the Foundation Model API format with messages
-        # Based on: https://www.databricks.com/blog/introducing-openais-new-open-models-databricks
-        request_data = {
-            "messages": [
-                {
-                    "role": "user", 
-                    "content": prompt
-                }
-            ],
-            "max_tokens": max_tokens,
-            "temperature": 0.7,
-            "top_p": 0.9
-        }
+        w = WorkspaceClient()
+        client = w.serving_endpoints.get_open_ai_client()  # OpenAI-compatible
         
-        logger.debug(f"Calling gpt-oss endpoint with payload: {request_data}")
-        
-        # Call the serving endpoint with user credentials
-        response = user_client.serving_endpoints.query(
-            name=SERVING_ENDPOINT,
-            inputs=request_data
+        r = client.chat.completions.create(
+            model=SERVING_ENDPOINT,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=max_tokens,
+            temperature=0.7
         )
         
-        # Extract the generated text from gpt-oss response
-        logger.debug(f"Response received: {response}")
+        logger.debug(f"Response received successfully")
         
-        # gpt-oss uses OpenAI-compatible format with choices
-        if hasattr(response, 'choices') and response.choices:
-            choice = response.choices[0]
-            if hasattr(choice, 'message') and hasattr(choice.message, 'content'):
-                return choice.message.content.strip()
-        
-        # If the above didn't work, log the issue
-        logger.warning(f"Unexpected gpt-oss response format: {type(response)} - {response}")
-        return None
+        try:
+            # Handle different content types
+            content = r.choices[0].message.content
+            logger.debug(f"Content type: {type(content)}, Content: {content}")
             
+            if content is None:
+                return ""
+            elif isinstance(content, list):
+                logger.debug(f"Processing list content with {len(content)} items")
+                # Extract useful text from structured response
+                extracted_text = extract_useful_text_from_structured_response(content)
+                if extracted_text:
+                    return extracted_text.strip()
+                
+                # Fallback: join all items
+                if len(content) > 0:
+                    str_items = []
+                    for item in content:
+                        str_items.append(str(item))
+                    result = " ".join(str_items)
+                    logger.debug(f"Joined result: {result}")
+                    return result.strip()
+                else:
+                    return ""
+            elif isinstance(content, str):
+                logger.debug(f"Processing string content")
+                return content.strip()
+            else:
+                logger.debug(f"Processing other type content: {type(content)}")
+                # Convert other types to string
+                return str(content).strip()
+                
+        except Exception as content_error:
+            logger.error(f"Error processing response content: {content_error}")
+            logger.debug(f"Raw response object: {r}")
+            # Try to extract any text we can
+            try:
+                return str(r.choices[0].message.content or "")
+            except:
+                return ""
+        
     except Exception as e:
-        logger.debug(f"Skipping Model Serving Endpoint due to error: {str(e)}")
+        logger.error(f"Error calling serving endpoint: {str(e)}")
+        logger.debug(f"Full error details: {type(e).__name__}: {e}")
         return None
+
 
 def generate_intervention_recommendations(student_data: Dict) -> Dict[str, any]:
     """Generate intelligent intervention recommendations using LLM"""
     
-    # Create a comprehensive prompt with student context
+    # Create a direct, actionable prompt
     prompt = f"""
-You are an expert academic advisor at a university. Based on the following student information, provide personalized intervention recommendations.
+Provide 3 specific intervention recommendations for this student. Be direct and actionable.
 
-Student Profile:
-- Name: {student_data.get('full_name', 'N/A')}
-- Student ID: {student_data.get('student_id', 'N/A')}
-- Major: {student_data.get('major', 'N/A')}
-- Year Level: {student_data.get('year_level', 'N/A')}
-- Current GPA: {student_data.get('gpa', 'N/A')}
-- Courses Enrolled: {student_data.get('courses_enrolled', 'N/A')}
-- Failing Grades: {student_data.get('failing_grades', 'N/A')}
-- Risk Category: {student_data.get('risk_category', 'N/A')}
-- Activity Status: {student_data.get('activity_status', 'N/A')}
+Student: {student_data.get('full_name', 'Student')} - {student_data.get('major', 'N/A')} - {student_data.get('year_level', 'N/A')}
+GPA: {student_data.get('gpa', 'N/A')} | Failing: {student_data.get('failing_grades', 0)}/{student_data.get('courses_enrolled', 0)} courses
+Risk Level: {student_data.get('risk_category', 'N/A')}
 
-Please provide:
-1. Top 3 recommended intervention types (from: Academic Meeting, Study Plan Assignment, Tutoring Referral, Counseling Referral, Financial Aid Consultation, Career Guidance Session, Peer Mentoring Program, Academic Probation Review)
-2. Priority level (High, Medium, Low) for each recommendation
-3. Specific action items for each intervention
-4. Expected timeline for implementation
-5. Success metrics to track
+Choose from these interventions: Academic Meeting, Study Plan Assignment, Tutoring Referral, Counseling Referral, Financial Aid Consultation, Career Guidance Session, Peer Mentoring Program, Academic Probation Review
 
-Format your response as a structured recommendation that an academic advisor can immediately act upon.
+Format:
+1. [Intervention Type] - [Priority: High/Medium/Low]
+   Action: [Specific action to take]
+   Timeline: [When to implement]
+   Goal: [Success metric]
+
+2. [Intervention Type] - [Priority: High/Medium/Low]
+   Action: [Specific action to take]
+   Timeline: [When to implement]
+   Goal: [Success metric]
+
+3. [Intervention Type] - [Priority: High/Medium/Low]
+   Action: [Specific action to take]
+   Timeline: [When to implement]
+   Goal: [Success metric]
 """
 
     # Call the LLM
@@ -260,28 +344,20 @@ def generate_personalized_intervention_details(intervention_type: str, student_d
     """Generate personalized intervention details using LLM"""
     
     prompt = f"""
-Create detailed, personalized intervention plan for a university student.
+Create a specific action plan for this intervention. Be direct and practical.
 
-Student Context:
-- Name: {student_data.get('full_name', 'N/A')}
-- Major: {student_data.get('major', 'N/A')}
-- Year: {student_data.get('year_level', 'N/A')}
-- GPA: {student_data.get('gpa', 'N/A')}
-- Risk Level: {student_data.get('risk_category', 'N/A')}
-- Failing Courses: {student_data.get('failing_grades', 0)} out of {student_data.get('courses_enrolled', 0)}
+Student: {student_data.get('full_name', 'N/A')} ({student_data.get('major', 'N/A')}, {student_data.get('year_level', 'N/A')})
+GPA: {student_data.get('gpa', 'N/A')} | Risk: {student_data.get('risk_category', 'N/A')}
+Intervention: {intervention_type} (Priority: {priority})
 
-Intervention Type: {intervention_type}
-Priority Level: {priority}
+Provide:
+• Objective: [What to achieve]
+• Action Steps: [Specific steps to take]
+• Timeline: [When to complete each step]
+• Resources: [What's needed]
+• Success Measure: [How to track progress]
 
-Provide a detailed, actionable intervention plan including:
-1. Specific objectives
-2. Recommended approach/methodology
-3. Timeline and milestones
-4. Resources needed
-5. Success metrics
-6. Follow-up actions
-
-Keep the response practical and implementable by academic advisors.
+Keep it concise and actionable for academic advisors.
 """
 
     llm_response = call_databricks_serving_endpoint(prompt, max_tokens=600)
@@ -520,8 +596,9 @@ def show_student_dashboard():
                 st.markdown("**LLM Configuration:**")
                 st.write(f"**Serving Endpoint:** {SERVING_ENDPOINT or 'Not configured'}")
                 st.write(f"**Model Type:** OpenAI gpt-oss (Foundation Model API)")
-                st.write(f"**Authentication:** On-behalf-of user authentication")
-                st.write(f"**SDK Integration:** Databricks AI Bridge")
+                st.write(f"**Client Type:** OpenAI-compatible client")
+                st.write(f"**Authentication:** Databricks SDK WorkspaceClient")
+                st.write(f"**Integration:** get_open_ai_client() method")
                 st.write(f"**Context Window:** 131k tokens")
                 st.write(f"**Features:** Chain-of-thought reasoning, tool use")
                 

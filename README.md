@@ -129,8 +129,9 @@ SERVING_ENDPOINT=your_model_endpoint_name
 ```
 
 #### Authentication:
-- Uses **on-behalf-of user authentication** via Databricks AI Bridge
-- No tokens required - leverages user's existing permissions
+- Uses **OpenAI-compatible client** from Databricks SDK
+- Leverages `WorkspaceClient().serving_endpoints.get_open_ai_client()`
+- Automatic authentication using workspace credentials
 - Secure and follows Databricks best practices
 
 ## 🚀 Databricks Deployment
