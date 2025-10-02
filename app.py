@@ -832,15 +832,14 @@ def main():
     st.markdown("---")
     
     # Sidebar
-    st.sidebar.title("Navigation")
+    st.sidebar.markdown("# 🏛️ Riverside University")
+    st.sidebar.markdown("*Student Success Center*")
     
     # Initialize page in session state if not exists
     if 'page' not in st.session_state:
         st.session_state.page = "Student Risk Dashboard"
     
     # Page navigation menu
-    st.sidebar.markdown("## 📋 Navigation")
-    st.sidebar.markdown("---")
     
     # Define pages with icons
     pages = [
@@ -979,10 +978,10 @@ def show_student_dashboard():
         risk_counts = df['risk_category'].value_counts()
         fig = px.pie(values=risk_counts.values, names=risk_counts.index, 
                     color_discrete_map={
-                        'High Risk': '#FF4B4B',
-                        'Medium Risk': '#FFA500',
-                        'Low Risk': '#00CC88',
-                        'Excellent': '#28A745'
+                        'High Risk': 'red',
+                        'Medium Risk': 'orange',
+                        'Low Risk': 'yellow',
+                        'Excellent': 'green'
                     })
         st.plotly_chart(fig, use_container_width=True)
         
