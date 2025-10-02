@@ -414,9 +414,7 @@ def generate_intervention_recommendations(student_data: Dict) -> Dict[str, any]:
                             },
                             "required": ["intervention_type", "priority", "action", "timeline", "goal"],
                             "additionalProperties": False
-                        },
-                        "minItems": 3,
-                        "maxItems": 3
+                        }
                     }
                 },
                 "required": ["recommendations"],
