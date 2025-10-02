@@ -1011,8 +1011,16 @@ def show_student_dashboard():
             (df['year_level'].isin(year_filter))
         ]
         
-        # Student list
-        st.subheader(f"Students at Risk ({len(filtered_df)} students)")
+        # Student list with dynamic count
+        total_students = len(df)
+        filtered_students = len(filtered_df)
+        
+        if filtered_students == total_students:
+            st.subheader(f"Students at Risk ({filtered_students} students)")
+        else:
+            st.subheader(f"Students at Risk ({filtered_students}/{total_students} students)")
+            if filtered_students < total_students:
+                st.info(f"📋 Showing {filtered_students} of {total_students} students based on current filters")
         
         # Color key/legend
         st.markdown("**Risk Category Color Key:**")
@@ -1032,10 +1040,64 @@ def show_student_dashboard():
         
         st.markdown("---")
         
+        # Add sorting functionality
+        st.subheader("Sort Options")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            sort_by = st.selectbox("Sort by:", 
+                                 options=["Risk Level", "Surname", "GPA (Low to High)", "GPA (High to Low)", 
+                                         "Failing Courses", "Student ID"],
+                                 index=0)
+        
+        with col2:
+            sort_order = st.selectbox("Order:", 
+                                    options=["Default", "Ascending", "Descending"],
+                                    index=0)
+        
+        # Apply sorting
+        def extract_surname(full_name):
+            """Extract surname from full name"""
+            if pd.isna(full_name) or not full_name:
+                return ""
+            parts = str(full_name).strip().split()
+            return parts[-1] if parts else ""
+        
+        # Add surname column for sorting
+        filtered_df = filtered_df.copy()
+        filtered_df['surname'] = filtered_df['full_name'].apply(extract_surname)
+        
+        # Sort the dataframe based on selection
+        if sort_by == "Risk Level":
+            # Default risk-based sorting
+            risk_order = {'High Risk': 1, 'Medium Risk': 2, 'Low Risk': 3, 'Excellent': 4}
+            filtered_df['risk_order'] = filtered_df['risk_category'].map(risk_order)
+            if sort_order == "Ascending":
+                filtered_df = filtered_df.sort_values(['risk_order', 'failing_grades'], ascending=[True, False])
+            elif sort_order == "Descending":
+                filtered_df = filtered_df.sort_values(['risk_order', 'failing_grades'], ascending=[False, True])
+            else:
+                filtered_df = filtered_df.sort_values(['risk_order', 'failing_grades'], ascending=[True, False])
+        elif sort_by == "Surname":
+            ascending = True if sort_order != "Descending" else False
+            filtered_df = filtered_df.sort_values('surname', ascending=ascending)
+        elif sort_by == "GPA (Low to High)":
+            filtered_df = filtered_df.sort_values('gpa', ascending=True)
+        elif sort_by == "GPA (High to Low)":
+            filtered_df = filtered_df.sort_values('gpa', ascending=False)
+        elif sort_by == "Failing Courses":
+            ascending = False if sort_order != "Ascending" else True
+            filtered_df = filtered_df.sort_values('failing_grades', ascending=ascending)
+        elif sort_by == "Student ID":
+            ascending = True if sort_order != "Descending" else False
+            filtered_df = filtered_df.sort_values('student_id', ascending=ascending)
+        
+        st.markdown("---")
+        
         # Display students in a more visual way
         for idx, student in filtered_df.iterrows():
             with st.container():
-                col1, col2, col3, col4 = st.columns([3, 1.5, 1.5, 2])
+                col1, col2, col3 = st.columns([3, 2.5, 2])
                 
                 with col1:
                     risk_color = get_risk_color(student['risk_category'])
@@ -1047,14 +1109,17 @@ def show_student_dashboard():
                     """, unsafe_allow_html=True)
                 
                 with col2:
-                    st.write(f"**Major:** {student['major']}")
-                    st.write(f"**Year:** {student['year_level']}")
+                    # Combined student details in a single column
+                    st.markdown(f"""
+                    **Academic Details:**  
+                    📚 Major: {student['major']}  
+                    🎓 Year: {student['year_level']}  
+                    📊 GPA: {student['gpa']:.2f}  
+                    ⚠️ Failing: {student['failing_grades']}/{student['courses_enrolled']} courses  
+                    🎯 Risk: {student['risk_category']}
+                    """)
                 
                 with col3:
-                    st.write(f"**GPA:** {student['gpa']:.2f}")
-                    st.write(f"**Failing:** {student['failing_grades']}/{student['courses_enrolled']}")
-                
-                with col4:
                     # Stack buttons vertically for better text readability
                     if st.button(f"🤖 AI Rec", key=f"ai_btn_{student['student_id']}", help="Get AI-powered intervention recommendations", use_container_width=True):
                         with st.spinner("Generating AI recommendations..."):
