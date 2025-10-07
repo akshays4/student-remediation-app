@@ -308,7 +308,25 @@ def call_databricks_serving_endpoint(prompt: str, max_tokens: int = 500, respons
         logger.debug(f"Calling gpt-oss endpoint: {SERVING_ENDPOINT}")
         
         w = WorkspaceClient()
-        client = w.serving_endpoints.get_open_ai_client()  # OpenAI-compatible
+        
+        # Try to use the new get_open_ai_client method if available
+        try:
+            client = w.serving_endpoints.get_open_ai_client()
+            logger.debug("Using get_open_ai_client() method")
+        except AttributeError:
+            # Fallback to manual OpenAI client configuration
+            logger.debug("get_open_ai_client() not available, using manual configuration")
+            from openai import OpenAI
+            
+            # Get the host and token from the workspace client
+            host = w.config.host
+            token = w.config.token
+            
+            # Configure OpenAI client for Databricks
+            client = OpenAI(
+                api_key=token,
+                base_url=f"{host}/serving-endpoints"
+            )
         
         # Prepare the request parameters
         request_params = {
@@ -899,7 +917,7 @@ def show_student_dashboard():
                 st.write(f"**Model Type:** OpenAI gpt-oss (Foundation Model API)")
                 st.write(f"**Client Type:** OpenAI-compatible client")
                 st.write(f"**Authentication:** Databricks SDK WorkspaceClient")
-                st.write(f"**Integration:** get_open_ai_client() method")
+                st.write(f"**Integration:** Auto-detects get_open_ai_client() or manual OpenAI configuration")
                 st.write(f"**Context Window:** 131k tokens")
                 st.write(f"**Features:** Chain-of-thought reasoning, tool use")
                 

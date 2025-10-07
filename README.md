@@ -129,8 +129,10 @@ SERVING_ENDPOINT=your_model_endpoint_name
 ```
 
 #### Authentication:
-- Uses **OpenAI-compatible client** from Databricks SDK
-- Leverages `WorkspaceClient().serving_endpoints.get_open_ai_client()`
+- **Auto-detects** available Databricks SDK methods
+- **Primary:** Uses `get_open_ai_client()` method when available (SDK >=0.35.0)
+- **Fallback:** Manual OpenAI client configuration for older SDK versions
+- Leverages `WorkspaceClient()` for authentication and configuration
 - Automatic authentication using workspace credentials
 - Secure and follows Databricks best practices
 
