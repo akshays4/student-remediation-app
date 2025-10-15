@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # Database configuration variables
-DATABASE_REMEDIATION_DATA = os.getenv("DATABASE_REMEDIATION_DATA", "akshay_student_remediation")
+DATABASE_REMEDIATION_DATA = os.getenv("DATABASE_REMEDIATION_DATA", "akshay_student_remediation_db")
 
 # Databricks Model Serving Endpoint Configuration
 SERVING_ENDPOINT = os.getenv("SERVING_ENDPOINT")
